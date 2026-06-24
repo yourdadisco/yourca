@@ -19,6 +19,7 @@ import { estimateMessagesTokens } from '../services/compact.js';
 import { microcompactMessages, autoCompactIfNeeded, shouldAutoCompact, buildPostCompactMessages, getAutoCompactState, resetAutoCompactState } from '../services/compact/index.js';
 import { classifyError, logError } from '../services/errors.js';
 import { createUserMessage } from './messages.js';
+import { enhanceSystemPrompt, autoSave } from '../services/vectorMemory/index.js';
 
 const DEEPSEEK_PRICING = { input: 0.00027, output: 0.0011 };
 const MAX_TURNS = 50;
@@ -169,7 +170,12 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
     let result;
 
     try {
-      result = await streamChatCompletion(systemPrompt, apiMessages, apiTools, {
+      const lastUserMsg = mutableMessages.filter(m => m.role === 'user').pop();
+      const queryText = lastUserMsg
+        ? lastUserMsg.content.filter(c => c.type === 'text').map(c => c.text).join(' ')
+        : '';
+      const enhancedPrompt = await enhanceSystemPrompt(systemPrompt, queryText).catch(() => systemPrompt);
+      result = await streamChatCompletion(enhancedPrompt, apiMessages, apiTools, {
         signal: abortController.signal,
         model,
       });
@@ -251,6 +257,12 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
       }
     }
 
+    // Auto-save assistant text
+    const assistantText = assistantContent.filter(c => c.type === 'text').map(c => c.text).join('\n');
+    if (assistantText.trim()) {
+      autoSave(assistantText).catch(() => {});
+    }
+
     const toolCalls = assistantContent.filter(
       (c): c is Content & { type: 'tool_use' } => c.type === 'tool_use',
     );
@@ -258,6 +270,12 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
     // No tool calls — conversation finished
     if (toolCalls.length === 0) {
       onEvent({ type: 'done', reason: 'completed' });
+      // Save final assistant message
+      const lastAsst = mutableMessages.filter(m => m.role === 'assistant').pop();
+      if (lastAsst) {
+        const text = lastAsst.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+        if (text.trim()) autoSave(text).catch(() => {});
+      }
       return mutableMessages;
     }
 

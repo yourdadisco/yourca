@@ -19,10 +19,21 @@ import { stdin as stdinIn, stdout as stdoutOut } from 'process';
 import { startREPLFromEntry } from './repl/REPL.js';
 import { runSingleQuery } from './repl/singleQuery.js';
 import { saveConfig, loadConfig } from './utils/config.js';
+import { initMempalace, detectProjectWing, setCurrentWing } from './services/vectorMemory/index.js';
 
 const VERSION = '0.1.0';
 
 async function main(): Promise<void> {
+  // Initialize MemPalace
+  try {
+    const wing = detectProjectWing();
+    setCurrentWing(wing);
+    await initMempalace({
+      l0Identity: `You are YourCA, a general-purpose AI assistant.\nCurrent wing: ${wing}\nDetermine your role from the project context.`,
+      wing,
+    });
+  } catch {}
+
   const args = process.argv.slice(2);
 
   // Parse --api-key flag (can appear anywhere)
