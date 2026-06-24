@@ -164,9 +164,6 @@ export async function saveMemory(options: {
   result.vectorIds = await storeMemory(options.content, {
     wing: 'default',
     room: 'memdir',
-    hall: options.type === 'user' ? 'preference' :
-          options.type === 'feedback' ? 'decision' :
-          options.type === 'reference' ? 'reference' : 'fact',
     tags: ['memdir', ...(options.tags ?? []), options.type],
   });
 
@@ -348,14 +345,12 @@ export async function savePreCompactContext(
 
   if (recentUserContent) {
     await storeMemory(recentUserContent, {
-      hall: 'fact',
       tags: ['pre-compact', 'user-requests'],
     });
   }
 
   if (recentAssistantContent) {
     await storeMemory(recentAssistantContent, {
-      hall: 'fact',
       tags: ['pre-compact', 'assistant-response'],
     });
   }
