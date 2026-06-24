@@ -1,131 +1,71 @@
-/**
- * Subagent system — ported from Claude Code's AgentTool / coordinator system.
- * Provides:
- * - Spawning sub-agents that can run their own query loops
- * - Isolated context per sub-agent (messages, tools, abort)
- * - Result collection from sub-agents
- * - Sub-agent lifecycle management
- */
-
-import type { Tool, ToolUseContext, Message, Content, ToolResult } from '../tool/Tool.js';
+import type { Tool, Message, Content, ToolUseContext } from '../tool/Tool.js';
+import { findToolByName } from '../tool/Tool.js';
 import { streamChatCompletion } from '../query/api.js';
-import { getMainLoopModel, addToTotalCostState, addToTotalDurationState, addTokenUsage, generateId } from '../state/bootstrap.js';
+import { getMainLoopModel, addToTotalCostState, addToTotalDurationState, addTokenUsage } from '../state/bootstrap.js';
+import { findAgent } from '../coordinator/agentRegistry.js';
+import { classifyError, logError } from './errors.js';
 
 export interface SubagentConfig {
-  /** System prompt for the subagent */
-  systemPrompt: string;
-  /** Initial messages to start with */
-  messages?: Message[];
-  /** Tools available to the subagent */
-  tools: readonly Tool[];
-  /** Parent context for abort propagation */
+  prompt: string;
+  agentType?: string;
   parentContext: ToolUseContext;
-  /** Max turns for the subagent loop */
+  tools: readonly Tool[];
   maxTurns?: number;
-  /** Called for each streaming text chunk */
-  onText?: (text: string) => void;
-  /** Optional label for tracking */
-  label?: string;
 }
 
 export interface SubagentResult {
-  /** All messages from the subagent conversation */
-  messages: Message[];
-  /** Final text output */
   text: string;
-  /** Whether the subagent completed successfully */
   success: boolean;
-  /** Any error message */
   error?: string;
-  /** Token usage */
   usage: { input_tokens: number; output_tokens: number };
+  toolCallCount: number;
 }
 
-// Track active subagents for cleanup
-const activeSubagents = new Map<string, AbortController>();
-
-export function getActiveSubagentCount(): number {
-  return activeSubagents.size;
-}
-
-export function stopSubagent(id: string): boolean {
-  const ctrl = activeSubagents.get(id);
-  if (ctrl) {
-    ctrl.abort();
-    activeSubagents.delete(id);
-    return true;
-  }
-  return false;
-}
-
-export function stopAllSubagents(): void {
-  for (const [id, ctrl] of activeSubagents) {
-    ctrl.abort();
-    activeSubagents.delete(id);
-  }
-}
-
-/**
- * Spawn a subagent with its own query loop.
- * Returns the subagent's conversation history.
- */
-export async function spawnSubagent(config: SubagentConfig): Promise<SubagentResult> {
-  const {
-    systemPrompt,
-    messages = [],
-    tools,
-    parentContext,
-    maxTurns = 10,
-    onText,
-    label = 'subagent',
-  } = config;
-
-  const agentId = `${label}_${generateId('a')}`;
+export async function runSubagent(config: SubagentConfig): Promise<SubagentResult> {
+  const agent = findAgent(config.agentType ?? 'general-purpose');
+  const systemPrompt = agent?.getSystemPrompt({ toolUseContext: { options: config.parentContext.options } }) ?? 'You are a helpful assistant.';
+  const maxTurns = config.maxTurns ?? agent?.maxTurns ?? 20;
   const abortController = new AbortController();
-  activeSubagents.set(agentId, abortController);
-
-  // Link to parent abort
-  const parentSignal = parentContext.abortController.signal;
-  const onParentAbort = () => {
-    if (!abortController.signal.aborted) {
-      abortController.abort();
-    }
-  };
-  if (!parentSignal.aborted) {
-    parentSignal.addEventListener('abort', onParentAbort, { once: true });
-  }
-
-  const mutableMessages: Message[] = [...messages];
+  const messages: Message[] = [{ role: 'user', content: [{ type: 'text', text: config.prompt }] }];
   let textOutput = '';
+  let toolCallCount = 0;
+  let totalInput = 0;
+  let totalOutput = 0;
+
+  // Link parent abort
+  const parentSignal = config.parentContext.abortController.signal;
+  const onAbort = () => { if (!abortController.signal.aborted) abortController.abort(); };
+  if (!parentSignal.aborted) parentSignal.addEventListener('abort', onAbort, { once: true });
 
   try {
     for (let turn = 0; turn < maxTurns; turn++) {
       if (abortController.signal.aborted) {
-        return {
-          messages: mutableMessages,
-          text: textOutput,
-          success: false,
-          error: 'Aborted',
-          usage: { input_tokens: 0, output_tokens: 0 },
-        };
+        return { text: textOutput, success: false, error: 'Aborted', usage: { input_tokens: totalInput, output_tokens: totalOutput }, toolCallCount };
       }
 
-      // Build API messages
-      const apiMessages = toSubagentApiMessages(mutableMessages);
-      const apiTools = tools
-        .filter(t => t.name !== 'Bash' || label !== 'subagent')
-        .map(t => ({
-          type: 'function' as const,
-          function: {
-            name: t.name,
-            description: t.description,
-            parameters: t.inputSchema as any,
-          },
-        }));
+      // Filter tools by agent definition
+      let availableTools = config.tools;
+      if (agent) {
+        if (agent.disallowedTools && agent.disallowedTools.length > 0) {
+          availableTools = availableTools.filter(t => !agent.disallowedTools!.includes(t.name));
+        }
+        if (agent.tools && agent.tools[0] !== '*' && agent.tools.length > 0) {
+          availableTools = availableTools.filter(t => agent.tools!.includes(t.name));
+        }
+      }
+
+      const apiTools = availableTools.map(t => ({
+        type: 'function' as const,
+        function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      }));
+
+      const apiMessages = messages.map(m => ({
+        role: m.role,
+        content: m.content.filter(c => c.type === 'text').map(c => c.text).join('\n') || null,
+      }));
 
       const startTime = Date.now();
       let result;
-
       try {
         result = await streamChatCompletion(systemPrompt, apiMessages, apiTools, {
           signal: abortController.signal,
@@ -133,13 +73,7 @@ export async function spawnSubagent(config: SubagentConfig): Promise<SubagentRes
         });
       } catch (err: any) {
         if (err.name === 'AbortError') {
-          return {
-            messages: mutableMessages,
-            text: textOutput,
-            success: false,
-            error: 'Aborted',
-            usage: { input_tokens: 0, output_tokens: 0 },
-          };
+          return { text: textOutput, success: false, error: 'Aborted', usage: { input_tokens: totalInput, output_tokens: totalOutput }, toolCallCount };
         }
         throw err;
       }
@@ -147,90 +81,61 @@ export async function spawnSubagent(config: SubagentConfig): Promise<SubagentRes
       const duration = Date.now() - startTime;
       addToTotalDurationState(duration);
       addTokenUsage(result.usage.input_tokens, result.usage.output_tokens);
+      totalInput += result.usage.input_tokens;
+      totalOutput += result.usage.output_tokens;
 
       // Build assistant content
       const assistantContent: Content[] = [];
-      let accText = '';
-      let toolCalls: any[] | null = null;
+      let text = '';
+      let toolCalls: any[] = [];
 
       for (const chunk of result.chunks) {
-        if (chunk.type === 'text' && chunk.text) {
-          accText += chunk.text;
-          if (onText) onText(chunk.text);
-          textOutput += chunk.text;
-        } else if (chunk.type === 'tool_call' && chunk.tool_calls) {
-          toolCalls = chunk.tool_calls;
-        }
+        if (chunk.type === 'text' && chunk.text) text += chunk.text;
+        else if (chunk.type === 'tool_call' && chunk.tool_calls) toolCalls = chunk.tool_calls;
       }
 
-      if (accText) {
-        assistantContent.push({ type: 'text', text: accText });
+      if (text) {
+        assistantContent.push({ type: 'text', text });
+        textOutput += text;
       }
-      if (toolCalls) {
+      if (toolCalls.length > 0) {
         for (const tc of toolCalls) {
-          assistantContent.push({
-            type: 'tool_use',
-            id: tc.id,
-            name: tc.function.name,
-            input: (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })(),
-          });
+          let input: Record<string, unknown> = {};
+          try { input = JSON.parse(tc.function.arguments); } catch {}
+          assistantContent.push({ type: 'tool_use', id: tc.id, name: tc.function.name, input });
         }
       }
-
       if (assistantContent.length === 0) break;
-      mutableMessages.push({ role: 'assistant', content: assistantContent });
 
-      // Check for tool calls to execute
-      const calls = assistantContent.filter(c => c.type === 'tool_use');
-      if (calls.length === 0) break;
+      messages.push({ role: 'assistant', content: assistantContent });
+
+      // Execute tool calls IN PROCESS
+      const toolUseBlocks = assistantContent.filter(c => c.type === 'tool_use');
+      if (toolUseBlocks.length === 0) break;
+      toolCallCount += toolUseBlocks.length;
 
       const toolResults: Content[] = [];
-      for (const call of calls) {
-        if (call.type !== 'tool_use') continue;
-
-        // For subagents, simplify: just report tool results as text
-        // Full tool execution is complex; subagents mainly do research/delegation
-        toolResults.push({
-          type: 'tool_result',
-          tool_use_id: call.id,
-          content: [{ type: 'text', text: `[Subagent: ${call.name} called with ${JSON.stringify(call.input).slice(0, 200)}]` }],
-          is_error: false,
-        });
+      for (const call of toolUseBlocks) {
+        const tool = findToolByName(config.tools, call.name);
+        if (!tool) {
+          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: [{ type: 'text', text: `Error: Unknown tool "${call.name}"` }], is_error: true });
+          continue;
+        }
+        try {
+          const toolResult = await tool.call(call.input, config.parentContext);
+          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: toolResult.content, is_error: toolResult.isError });
+        } catch (err: any) {
+          toolResults.push({ type: 'tool_result', tool_use_id: call.id, content: [{ type: 'text', text: `Error: ${err.message}` }], is_error: true });
+        }
       }
 
-      mutableMessages.push({ role: 'user', content: toolResults });
+      messages.push({ role: 'user', content: toolResults });
     }
-
-    return {
-      messages: mutableMessages,
-      text: textOutput,
-      success: true,
-      usage: { input_tokens: 0, output_tokens: 0 },
-    };
   } catch (err: any) {
-    return {
-      messages: mutableMessages,
-      text: textOutput,
-      success: false,
-      error: err.message,
-      usage: { input_tokens: 0, output_tokens: 0 },
-    };
+    return { text: textOutput, success: false, error: err.message, usage: { input_tokens: totalInput, output_tokens: totalOutput }, toolCallCount };
   } finally {
-    activeSubagents.delete(agentId);
-    parentSignal.removeEventListener('abort', onParentAbort);
+    parentSignal.removeEventListener('abort', onAbort);
   }
-}
 
-function toSubagentApiMessages(messages: Message[]): any[] {
-  const result: any[] = [];
-  for (const msg of messages) {
-    if (msg.role === 'user') {
-      const text = msg.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-      result.push({ role: 'user', content: text || '(empty)' });
-    } else if (msg.role === 'assistant') {
-      const text = msg.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
-      result.push({ role: 'assistant', content: text || null });
-    }
-  }
-  return result;
+  return { text: textOutput, success: true, usage: { input_tokens: totalInput, output_tokens: totalOutput }, toolCallCount };
 }
