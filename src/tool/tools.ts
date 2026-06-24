@@ -20,6 +20,8 @@ import {
   MemoryForget,
 } from './built-in/MemoryTool.js';
 import { AgentTool } from './built-in/AgentTool.js';
+import { SendMessageTool } from './built-in/SendMessageTool.js';
+import { TaskStopTool } from './built-in/TaskStopTool.js';
 
 const ALL_BASE_TOOLS: readonly Tool[] = [
   BashTool,
@@ -36,6 +38,8 @@ const ALL_BASE_TOOLS: readonly Tool[] = [
   MemoryStats,
   MemoryForget,
   AgentTool,
+  SendMessageTool,
+  TaskStopTool,
 ];
 
 /**

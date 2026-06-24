@@ -1,153 +1,46 @@
 /**
- * Coordinator Mode — centralized multi-agent orchestration.
- * Ported from Claude Code's coordinator system.
+ * Coordinator Mode — triggered by YOURCA_COORDINATOR_MODE env var.
+ * Changes the system prompt and agent types to treat the model as a
+ * coordinator that spawns worker agents.
  */
 
-import { generateId } from '../state/bootstrap.js';
-
-// ─── Types ───
-
-export interface WorkerTask {
-  id: string;
-  prompt: string;
-  tools?: string[];
-  model?: string;
-  maxTurns?: number;
+function isEnvTruthy(val: string | undefined): boolean {
+  return val === '1' || val === 'true' || val === 'yes';
 }
 
-export interface WorkerResult {
-  taskId: string;
-  success: boolean;
-  text: string;
-  error?: string;
-  tokensUsed: { input: number; output: number };
-}
-
-export interface OrchestrationPlan {
-  id: string;
-  goal: string;
-  workers: WorkerTask[];
-  parallelGroups: number[][];
-}
-
-interface ActiveWorker {
-  id: string;
-  taskId: string;
-  abortController: AbortController;
-  startTime: number;
-}
-
-// ─── Module State ───
-
-const activeWorkers = new Map<string, ActiveWorker>();
-let coordinatorActive = false;
-
-// ─── Coordinator Mode Control ───
+let _active = false;
 
 export function isCoordinatorMode(): boolean {
-  return coordinatorActive;
+  return _active || isEnvTruthy(process.env.YOURCA_COORDINATOR_MODE);
 }
 
 export function setCoordinatorMode(active: boolean): void {
-  coordinatorActive = active;
-}
-
-export function getCoordinatorUserContext(): Record<string, string> {
-  if (!coordinatorActive) return {};
-
-  const workerTools = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'].sort().join(', ');
-
-  return {
-    workerToolsContext: `Workers spawned by the coordinator have access to these tools: ${workerTools}
-The coordinator should decompose complex tasks into parallel subtasks:
-- Research phase: spawn workers to gather information in parallel
-- Synthesis phase: combine findings
-- Implementation phase: spawn workers to make changes
-- Verification phase: spawn workers to verify results
-
-Each worker gets a self-contained prompt. The coordinator must synthesize the final output.`,
-  };
+  _active = active;
 }
 
 export function getCoordinatorSystemPrompt(): string {
-  if (!coordinatorActive) return '';
-
-  return `You are an orchestration coordinator, not an executor.
+  return `You are an orchestration coordinator.
 
 ## Your Role
 - Decompose complex tasks into smaller, parallel subtasks
-- Spawn workers via the Agent tool to execute subtasks
-- Synthesize worker results into a coherent final response
-- Verify that all parts of the task are complete
+- Use the Agent tool to spawn workers for research, implementation, verification
+- Synthesize worker results into a coherent response
+- Workers run in background — you'll receive notifications when they complete
 
 ## Workflow
-1. **Research** — Analyze the task and plan decomposition
-2. **Spawn** — Launch workers with self-contained prompts
-3. **Synthesize** — Combine results from all workers
-4. **Verify** — Check completeness and correctness
+1. **Research** — Spawn workers to investigate in parallel
+2. **Synthesize** — Read findings, plan approach
+3. **Implement** — Spawn workers for implementation
+4. **Verify** — Spawn verify agent to check results
 
 ## Guidelines
-- Workers can run in parallel when they work on independent files
-- Workers that modify the same file must run sequentially
-- Each worker prompt must be complete and self-contained
-- Always verify worker results before accepting them
-- If a worker fails, spawn a new worker to fix the issue`;
+- Workers cannot see your conversation — make prompts self-contained
+- Parallel independent work whenever possible
+- After spawning, briefly report what you launched`;
 }
 
-// ─── Worker Management ───
-
-export function createWorker(prompt: string, options?: { tools?: string[]; model?: string; maxTurns?: number }): WorkerTask {
-  const id = `worker_${generateId('w').slice(2)}`;
-  return { id, prompt, tools: options?.tools, model: options?.model, maxTurns: options?.maxTurns ?? 10 };
-}
-
-export function createOrchestrationPlan(goal: string): OrchestrationPlan {
-  return { id: `plan_${generateId('p').slice(2)}`, goal, workers: [], parallelGroups: [] };
-}
-
-export function addWorkerToPlan(plan: OrchestrationPlan, worker: WorkerTask, parallelGroup?: number): void {
-  const idx = plan.workers.length;
-  plan.workers.push(worker);
-  if (parallelGroup !== undefined) {
-    const group = plan.parallelGroups.find(g => g[0] === parallelGroup);
-    if (group) { group.push(idx); }
-    else { plan.parallelGroups.push([idx]); }
-  }
-}
-
-export function registerActiveWorker(taskId: string): string {
-  const id = `active_${generateId('a').slice(2)}`;
-  const worker: ActiveWorker = { id, taskId, abortController: new AbortController(), startTime: Date.now() };
-  activeWorkers.set(id, worker);
-  return id;
-}
-
-export function getWorker(workerId: string): ActiveWorker | undefined {
-  return activeWorkers.get(workerId);
-}
-
-export function stopWorker(workerId: string): boolean {
-  const worker = activeWorkers.get(workerId);
-  if (worker) {
-    worker.abortController.abort();
-    activeWorkers.delete(workerId);
-    return true;
-  }
-  return false;
-}
-
-export function stopAllWorkers(): void {
-  for (const [id, worker] of activeWorkers) {
-    worker.abortController.abort();
-    activeWorkers.delete(id);
-  }
-}
-
-export function getActiveWorkerCount(): number {
-  return activeWorkers.size;
-}
-
-export function getCoordinatorPromptAppendix(): string {
-  if (!coordinatorActive) return '';
-  return `\n\n## Available Worker Tools\nWorkers have access to: Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch\n\n## Orchestration Strategy\nFor multi-step tasks:\n1. **Research** — Gather information first (parallel)\n2. **Plan** — Design the solution\n3. **Implement** — Execute changes (parallel where possible)\n4. **Verify** — Test the results`;
+export function getCoordinatorUserContext(): Record<string, string> {
+  return {
+    workerToolsContext: `Available tools for workers: Bash, Read, Write, Edit, Glob, Grep, WebSearch, WebFetch`,
+  };
 }
