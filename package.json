@@ -12,6 +12,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@mempalace/core": "^0.1.1",
     "@types/react": "^18.3.31",
     "chalk": "^5.3.0",
     "ink": "^5.2.1",

@@ -33,7 +33,6 @@ import {
   buildRagContext,
   enhanceSystemPrompt,
   clearMemories,
-  setEmbeddingProvider,
   type MemoryChunk,
   type SearchHit,
 } from '../services/vectorMemory/index.js';

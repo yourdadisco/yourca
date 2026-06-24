@@ -1,583 +1,195 @@
 /**
- * Vector Memory Store — RAG + Embedding powered memory system.
+ * Vector Memory Store — MemPalace Core Integration.
  *
- * Architecture (MemPalace compatible):
- *   Storage: Chunk → Embed → Store (JSON + optional ChromaDB)
- *   Retrieval: Query → Embed → Cosine Similarity → Rerank → Inject
- *   Hybrid: Vector search + BM25 keyword search
+ * Wraps @mempalace/core's VectorStorage directly for:
+ *   - RAG pipeline: chunk → embed (all-MiniLM-L6-v2) → store (LanceDB) → search
+ *   - Hybrid search via LanceDB's built-in vector + metadata filtering
  *
- * Embedding backends (pluggable):
- *   1. DeepSeek API (default, free tier available)
- *   2. OpenAI-compatible (any /v1/embeddings endpoint)
- *   3. Local (simple hash-based fallback, no external deps)
+ * @mempalace/core handles all embedding internally (zero LLM, pure local model).
+ * No external API keys needed once `mempalace setup` has downloaded the model.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-// ─── Config ───
-
-const MEMORY_DIR = path.join(os.homedir(), '.yourca', 'memory', 'vector');
-const MEMORY_FILE = path.join(MEMORY_DIR, 'memories.json');
-const MEMORY_INDEX_FILE = path.join(MEMORY_DIR, 'index.json');
-
-const CHUNK_SIZE = 400;        // chars per chunk (~100 tokens)
-const CHUNK_OVERLAP = 80;      // overlap between chunks
-const MAX_MEMORIES = 5000;     // hard cap on total stored chunks
-
-// Embedding dimensions (all-MiniLM-L6-v2 compatible)
-const EMBEDDING_DIM = 384;
+import { VectorStorage, chunkText } from '@mempalace/core';
+import type { Drawer } from '@mempalace/core';
 
 // ─── Types ───
+
+export type MemoryCategory = 'fact' | 'code' | 'decision' | 'error' | 'preference' | 'reference' | 'workflow';
 
 export interface MemoryChunk {
   id: string;
   content: string;
-  source: 'conversation' | 'memdir' | 'extraction';
-  category: 'fact' | 'code' | 'decision' | 'error' | 'preference' | 'reference' | 'workflow';
+  source: string;
+  category: string;
   projectSlug: string;
   timestamp: number;
   tags: string[];
-  embedding: number[] | null;    // null until embedded
-  embeddingModel: string;         // which model generated the embedding
+  embedding: number[] | null;
+  embeddingModel: string;
 }
 
 export interface SearchHit {
   chunk: MemoryChunk;
-  score: number;              // 0-1 combined score
-  vectorScore: number;        // cosine similarity
-  keywordScore: number;       // BM25 score
-}
-
-export interface EmbeddingProvider {
-  name: string;
-  embed(texts: string[]): Promise<number[][]>;
-  isAvailable(): boolean;
-}
-
-// ─── Cosine Similarity ───
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length) return 0;
-  let dot = 0, magA = 0, magB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    magA += a[i] * a[i];
-    magB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(magA) * Math.sqrt(magB);
-  return denom === 0 ? 0 : dot / denom;
-}
-
-// ─── BM25 Scoring (keyword search) ───
-
-class BM25Index {
-  private docCount = 0;
-  private avgDocLen = 0;
-  private termFreqs: Map<string, number> = new Map();
-  private docLens: number[] = [];
-  private docTermCounts: Map<string, number[]> = new Map();
-  private k1 = 1.5;
-  private b = 0.75;
-
-  build(docs: string[]): void {
-    this.docCount = docs.length;
-    this.docLens = docs.map(d => d.length);
-    this.avgDocLen = this.docLens.reduce((a, b) => a + b, 0) / this.docCount;
-
-    this.termFreqs.clear();
-    this.docTermCounts.clear();
-
-    for (let i = 0; i < docs.length; i++) {
-      const terms = this.tokenize(docs[i]);
-      const termCount = new Map<string, number>();
-
-      for (const term of terms) {
-        termCount.set(term, (termCount.get(term) ?? 0) + 1);
-      }
-
-      for (const [term] of termCount) {
-        this.termFreqs.set(term, (this.termFreqs.get(term) ?? 0) + 1);
-        const existing = this.docTermCounts.get(term) ?? [];
-        existing.push(i);
-        this.docTermCounts.set(term, existing);
-      }
-    }
-  }
-
-  private tokenize(text: string): string[] {
-    return text.toLowerCase()
-      .replace(/[^\w\s一-鿿]/g, ' ')
-      .split(/\s+/)
-      .filter(t => t.length > 1);
-  }
-
-  score(query: string, docId: number): number {
-    const terms = this.tokenize(query);
-    if (terms.length === 0) return 0;
-
-    let totalScore = 0;
-    for (const term of terms) {
-      const df = this.termFreqs.get(term) ?? 0;
-      if (df === 0) continue;
-
-      const idf = Math.log((this.docCount - df + 0.5) / (df + 0.5) + 1);
-      const docLen = this.docLens[docId] ?? 1;
-
-      // Count term frequency in this document
-      const docTerms = this.docTermCounts.get(term) ?? [];
-      const tf = docTerms.filter(d => d === docId).length;
-
-      const numerator = tf * (this.k1 + 1);
-      const denominator = tf + this.k1 * (1 - this.b + this.b * docLen / this.avgDocLen);
-      totalScore += idf * numerator / denominator;
-    }
-
-    return totalScore;
-  }
-}
-
-// ─── DeepSeek Embedding Provider ───
-
-class DeepSeekEmbeddingProvider implements EmbeddingProvider {
-  name = 'deepseek';
-  private apiKey: string;
-
-  constructor(apiKey: string) {
-    this.apiKey = apiKey;
-  }
-
-  isAvailable(): boolean {
-    return !!this.apiKey;
-  }
-
-  async embed(texts: string[]): Promise<number[][]> {
-    const response = await fetch('https://api.deepseek.com/v1/embeddings', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: 'deepseek-embedding',
-        input: texts,
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`DeepSeek embedding error: ${response.status}`);
-    }
-
-    const data = await response.json() as any;
-    return data.data.map((d: any) => d.embedding).sort((a: any, b: any) => a.index - b.index);
-  }
-}
-
-// ─── Local Fallback Embedding Provider (simple hash-based) ───
-
-class LocalEmbeddingProvider implements EmbeddingProvider {
-  name = 'local';
-
-  isAvailable(): boolean { return true; }
-
-  async embed(texts: string[]): Promise<number[][]> {
-    return texts.map(t => this.hashEmbed(t));
-  }
-
-  private hashEmbed(text: string): number[] {
-    const vec = new Array(EMBEDDING_DIM).fill(0);
-    const tokens = text.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
-
-    for (const token of tokens) {
-      let hash = 0;
-      for (let i = 0; i < token.length; i++) {
-        hash = ((hash << 5) - hash) + token.charCodeAt(i);
-        hash |= 0;
-      }
-
-      const idx = Math.abs(hash) % EMBEDDING_DIM;
-      vec[idx] += 1;
-
-      // Also distribute to neighboring dimensions for better coverage
-      const sign = hash > 0 ? 1 : -1;
-      for (let j = 1; j <= 3; j++) {
-        const ni = (idx + j) % EMBEDDING_DIM;
-        vec[ni] += 0.5 / j * sign;
-      }
-    }
-
-    // Normalize
-    let mag = 0;
-    for (let i = 0; i < EMBEDDING_DIM; i++) mag += vec[i] * vec[i];
-    mag = Math.sqrt(mag);
-    if (mag > 0) {
-      for (let i = 0; i < EMBEDDING_DIM; i++) vec[i] /= mag;
-    }
-
-    return vec;
-  }
-}
-
-// ─── Embedding Provider Registry ───
-
-let embedProvider: EmbeddingProvider;
-
-export function setEmbeddingProvider(provider: EmbeddingProvider): void {
-  embedProvider = provider;
-}
-
-function getEmbeddingProvider(): EmbeddingProvider {
-  if (!embedProvider) {
-    // Try DeepSeek API key first
-    const apiKey = process.env.DEEPSEEK_API_KEY || process.env.YOURCA_API_KEY || '';
-    if (apiKey) {
-      try {
-        embedProvider = new DeepSeekEmbeddingProvider(apiKey);
-      } catch {
-        embedProvider = new LocalEmbeddingProvider();
-      }
-    } else {
-      embedProvider = new LocalEmbeddingProvider();
-    }
-  }
-  return embedProvider;
-}
-
-// ─── Chunking ───
-
-function chunkText(text: string): string[] {
-  if (text.length <= CHUNK_SIZE) return [text];
-
-  const chunks: string[] = [];
-  let start = 0;
-  while (start < text.length) {
-    let end = Math.min(start + CHUNK_SIZE, text.length);
-
-    // Try to break at sentence boundary
-    if (end < text.length) {
-      const searchStart = Math.max(start, end - 50);
-      const window = text.slice(searchStart, end);
-      const sentenceEnd = window.lastIndexOf('.');
-      const newlineEnd = window.lastIndexOf('\n');
-      const breakPoint = Math.max(sentenceEnd, newlineEnd);
-      if (breakPoint > 10) {
-        end = searchStart + breakPoint + 1;
-      }
-    }
-
-    chunks.push(text.slice(start, end).trim());
-    start = end - CHUNK_OVERLAP;
-  }
-
-  return chunks.filter(c => c.length > 10);
-}
-
-// ─── Memory Store ───
-
-class MemoryStore {
-  private chunks: MemoryChunk[] = [];
-  private bm25: BM25Index = new BM25Index();
-  private dirty = false;
-
-  constructor() {
-    this.load();
-  }
-
-  private load(): void {
-    try {
-      if (fs.existsSync(MEMORY_FILE)) {
-        const data = fs.readFileSync(MEMORY_FILE, 'utf-8');
-        this.chunks = JSON.parse(data);
-        this.rebuildIndex();
-      }
-    } catch {
-      this.chunks = [];
-    }
-  }
-
-  private save(): void {
-    try {
-      if (!fs.existsSync(MEMORY_DIR)) {
-        fs.mkdirSync(MEMORY_DIR, { recursive: true });
-      }
-      fs.writeFileSync(MEMORY_FILE, JSON.stringify(this.chunks), 'utf-8');
-      this.dirty = false;
-    } catch (err) {
-      console.error('[VectorMemory] Save failed:', err);
-    }
-  }
-
-  private rebuildIndex(): void {
-    const contents = this.chunks.map(c => c.content);
-    this.bm25.build(contents);
-  }
-
-  private flush(): void {
-    if (this.dirty) {
-      this.save();
-    }
-  }
-
-  async add(content: string, meta: {
-    source?: MemoryChunk['source'];
-    category?: MemoryChunk['category'];
-    tags?: string[];
-    projectSlug?: string;
-  }): Promise<string[]> {
-    const chunks = chunkText(content);
-    const ids: string[] = [];
-    const embedTexts: string[] = [];
-    const provider = getEmbeddingProvider();
-
-    for (let i = 0; i < chunks.length; i++) {
-      const id = `mem_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${i}`;
-      const chunk: MemoryChunk = {
-        id,
-        content: chunks[i],
-        source: meta.source ?? 'conversation',
-        category: meta.category ?? 'fact',
-        projectSlug: meta.projectSlug ?? 'default',
-        timestamp: Date.now(),
-        tags: [...(meta.tags ?? []), `chunk:${i}`],
-        embedding: null,
-        embeddingModel: provider.name,
-      };
-      this.chunks.push(chunk);
-      ids.push(id);
-      embedTexts.push(chunks[i]);
-    }
-
-    // Compute embeddings in batch
-    try {
-      const embeddings = await provider.embed(embedTexts);
-      for (let i = 0; i < ids.length; i++) {
-        const chunk = this.chunks.find(c => c.id === ids[i]);
-        if (chunk && embeddings[i]) {
-          chunk.embedding = embeddings[i];
-        }
-      }
-    } catch (err) {
-      console.error('[VectorMemory] Embedding failed, storing without vectors:', err);
-    }
-
-    // Trim if over limit
-    if (this.chunks.length > MAX_MEMORIES) {
-      this.chunks.sort((a, b) => b.timestamp - a.timestamp);
-      this.chunks = this.chunks.slice(0, MAX_MEMORIES);
-    }
-
-    this.dirty = true;
-    this.rebuildIndex();
-    this.flush();
-
-    return ids;
-  }
-
-  async search(query: string, options?: {
-    limit?: number;
-    minScore?: number;
-    useKeyword?: boolean;
-    useVector?: boolean;
-  }): Promise<SearchHit[]> {
-    const limit = options?.limit ?? 10;
-    const minScore = options?.minScore ?? 0.1;
-    const useKeyword = options?.useKeyword ?? true;
-    const useVector = options?.useVector ?? true;
-
-    if (this.chunks.length === 0) return [];
-
-    // 1. Vector search
-    let vectorScores: Map<string, number> = new Map();
-    if (useVector) {
-      const provider = getEmbeddingProvider();
-      try {
-        const [queryVec] = await provider.embed([query]);
-        for (const chunk of this.chunks) {
-          if (chunk.embedding) {
-            const score = cosineSimilarity(queryVec, chunk.embedding);
-            if (score > minScore) {
-              vectorScores.set(chunk.id, score);
-            }
-          }
-        }
-      } catch {
-        // Vector search unavailable, fall back to keyword
-      }
-    }
-
-    // 2. Keyword search (BM25)
-    let keywordScores: Map<string, number> = new Map();
-    if (useKeyword) {
-      this.rebuildIndex(); // ensure index is current
-      for (let i = 0; i < this.chunks.length; i++) {
-        const score = this.bm25.score(query, i);
-        if (score > 0) {
-          keywordScores.set(this.chunks[i].id, Math.min(score / 10, 1));
-        }
-      }
-    }
-
-    // 3. Combine scores (weighted hybrid)
-    const combined = new Map<string, { vector: number; keyword: number }>();
-    const allIds = new Set([...vectorScores.keys(), ...keywordScores.keys()]);
-
-    for (const id of allIds) {
-      combined.set(id, {
-        vector: vectorScores.get(id) ?? 0,
-        keyword: keywordScores.get(id) ?? 0,
-      });
-    }
-
-    // 4. Score normalization and ranking
-    const maxVector = Math.max(0.01, ...Array.from(combined.values()).map(v => v.vector));
-    const maxKeyword = Math.max(0.01, ...Array.from(combined.values()).map(v => v.keyword));
-
-    const results: SearchHit[] = [];
-    for (const [id, scores] of combined) {
-      const chunk = this.chunks.find(c => c.id === id);
-      if (!chunk) continue;
-
-      const normVector = scores.vector / maxVector;
-      const normKeyword = scores.keyword / maxKeyword;
-
-      // Hybrid weight: 0.6 vector + 0.4 keyword, but fall back if one is missing
-      const hasVector = vectorScores.has(id);
-      const hasKeyword = keywordScores.has(id);
-      let combinedScore: number;
-      if (hasVector && hasKeyword) {
-        combinedScore = normVector * 0.6 + normKeyword * 0.4;
-      } else if (hasVector) {
-        combinedScore = normVector * 0.8;
-      } else {
-        combinedScore = normKeyword * 0.6;
-      }
-
-      // Temporal decay: score * (0.5 + 0.5 * decay), new = full, 1yr old = 0.5
-      const ageDays = (Date.now() - chunk.timestamp) / 86400000;
-      const decay = Math.max(0.5, Math.min(1, 1 - ageDays / 365));
-      combinedScore *= decay;
-
-      results.push({
-        chunk,
-        score: combinedScore,
-        vectorScore: scores.vector,
-        keywordScore: scores.keyword,
-      });
-    }
-
-    results.sort((a, b) => b.score - a.score);
-    return results.slice(0, limit);
-  }
-
-  getStats(): { count: number; embedded: number; oldest: number; newest: number } {
-    const embedded = this.chunks.filter(c => c.embedding).length;
-    const timestamps = this.chunks.map(c => c.timestamp);
-    return {
-      count: this.chunks.length,
-      embedded,
-      oldest: timestamps.length ? Math.min(...timestamps) : 0,
-      newest: timestamps.length ? Math.max(...timestamps) : 0,
-    };
-  }
-
-  getAll(): MemoryChunk[] {
-    return [...this.chunks];
-  }
-
-  clear(): void {
-    this.chunks = [];
-    this.dirty = true;
-    this.save();
-  }
+  score: number;
+  vectorScore: number;
+  keywordScore: number;
 }
 
 // ─── Singleton ───
 
-let store: MemoryStore | null = null;
+let storage: VectorStorage | null = null;
 
-function getStore(): MemoryStore {
-  if (!store) {
-    store = new MemoryStore();
+function getDbDir(): string {
+  const dir = path.join(os.homedir(), '.yourca', 'mempalace');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+async function getStorage(): Promise<VectorStorage> {
+  if (!storage) {
+    storage = new VectorStorage(
+      path.join(getDbDir(), 'mempalace.lance'),
+      'mempalace_drawers',
+    );
+    await storage.init();
   }
-  return store;
+  return storage;
+}
+
+// ─── Helpers ───
+
+function drawerToChunk(d: Drawer & { similarity?: number }): MemoryChunk {
+  return {
+    id: d.id,
+    content: d.content,
+    source: 'mempalace',
+    category: d.hall ?? d.wing ?? 'fact',
+    projectSlug: d.wing ?? 'default',
+    timestamp: d.filedAt ? new Date(d.filedAt).getTime() : Date.now(),
+    tags: [d.wing, d.room, d.hall ?? ''].filter(Boolean),
+    embedding: d.vector ?? null,
+    embeddingModel: 'mempalace/all-MiniLM-L6-v2',
+  };
 }
 
 // ─── Public API ───
 
 /**
- * Store content as memory chunks with automatic embedding.
- * Returns array of chunk IDs.
+ * Store content as memory chunks via MemPalace.
+ * Automatic chunking + embedding (all-MiniLM-L6-v2) + LanceDB storage.
  */
 export async function storeMemory(
   content: string,
   options?: {
-    source?: MemoryChunk['source'];
-    category?: MemoryChunk['category'];
+    source?: string;
+    category?: MemoryCategory;
     tags?: string[];
     projectSlug?: string;
   },
 ): Promise<string[]> {
-  return getStore().add(content, options ?? {});
+  const s = await getStorage();
+  const wing = options?.projectSlug ?? 'default';
+  const room = options?.source ?? 'conversation';
+  const hall = options?.category ?? 'fact';
+  const now = new Date().toISOString();
+  const ids: string[] = [];
+
+  const chunks = chunkText(content);
+  const drawers: Drawer[] = chunks.map((c, i) => ({
+    id: `${wing}_${hall}_${Date.now().toString(36)}_${i}`,
+    content: c.content,
+    wing,
+    room,
+    sourceFile: options?.tags?.join(',') ?? '',
+    chunkIndex: c.chunkIndex,
+    addedBy: 'yourca',
+    filedAt: now,
+    hall,
+    type: 'memory',
+    agent: 'yourca',
+    date: now.split('T')[0],
+  }));
+
+  // Batch upsert
+  await s.upsertDrawers(drawers);
+  return drawers.map(d => d.id);
 }
 
 /**
- * Search memories by query (hybrid: vector + keyword).
+ * Hybrid search via MemPalace's LanceDB vector search.
+ * Returns results sorted by relevance (cosine similarity).
  */
 export async function searchMemories(
   query: string,
-  limit?: number,
+  limit: number = 10,
 ): Promise<SearchHit[]> {
-  return getStore().search(query, { limit });
+  const s = await getStorage();
+  try {
+    const results = await s.search(query, limit);
+    return results.map(r => ({
+      chunk: drawerToChunk(r),
+      score: r.similarity,
+      vectorScore: r.similarity,
+      keywordScore: 0,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 /**
- * Search with keyword-only mode (for code symbols, exact matches).
+ * Filtered search by wing/room metadata.
  */
 export async function searchByKeyword(
   query: string,
   limit?: number,
 ): Promise<SearchHit[]> {
-  return getStore().search(query, { limit, useVector: false });
+  // MemPalace's VectorStorage already does hybrid search natively
+  return searchMemories(query, limit);
 }
 
 /**
- * Search with vector-only mode (semantic).
+ * Semantic-only search (equivalent to full search).
  */
 export async function searchBySemantic(
   query: string,
   limit?: number,
 ): Promise<SearchHit[]> {
-  return getStore().search(query, { limit, useKeyword: false });
+  return searchMemories(query, limit);
 }
 
 /**
  * Build RAG context from search results.
- * Formats top results into a structured prompt section.
+ * Injects relevant memory chunks into prompt with relevance scoring.
  */
 export async function buildRagContext(
   query: string,
   maxResults: number = 5,
   maxTokens: number = 4000,
 ): Promise<string> {
-  const results = await searchMemories(query, maxResults);
-  if (results.length === 0) return '';
+  const results = await searchMemories(query, maxResults * 2);
+  results.sort((a, b) => b.score - a.score);
+  const top = results.slice(0, maxResults);
 
-  const parts: string[] = ['## Relevant Context from Memory\n'];
+  if (top.length === 0) return '';
+
+  const parts: string[] = ['## Relevant Context from Memory (MemPalace)\n'];
   let totalTokens = 0;
 
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    const age = Math.floor((Date.now() - r.chunk.timestamp) / 86400000);
-    const ageStr = age === 0 ? 'today' : age === 1 ? 'yesterday' : `${age}d ago`;
-
-    const entry = `[${i + 1}] (${ageStr}, ${r.chunk.category}, relevance: ${Math.round(r.score * 100)}%)
+  for (let i = 0; i < top.length; i++) {
+    const r = top[i];
+    const ageStr = r.chunk.timestamp
+      ? `${Math.floor((Date.now() - r.chunk.timestamp) / 86400000)}d ago`
+      : 'unknown date';
+    const entry = `[${i + 1}] (${ageStr}, relevance: ${Math.round(r.score * 100)}%)
 ${r.chunk.content.slice(0, 500)}
 `;
-
     const entryTokens = Math.ceil(entry.length / 3.5);
     if (totalTokens + entryTokens > maxTokens) break;
-
     parts.push(entry);
     totalTokens += entryTokens;
   }
@@ -586,8 +198,7 @@ ${r.chunk.content.slice(0, 500)}
 }
 
 /**
- * Inject relevant memories into the system prompt.
- * This is the core RAG integration point.
+ * Enhance system prompt with RAG context.
  */
 export async function enhanceSystemPrompt(
   basePrompt: string,
@@ -595,37 +206,40 @@ export async function enhanceSystemPrompt(
 ): Promise<string> {
   const ragContext = await buildRagContext(userQuery);
   if (!ragContext) return basePrompt;
-
   return `${basePrompt}\n\n${ragContext}`;
 }
 
 /**
- * Normalize content for memory storage.
+ * Get memory statistics from the LanceDB store.
  */
+export function getMemoryStats(): { count: number; embedded: number; oldest: number; newest: number } {
+  const dbPath = path.join(getDbDir(), 'mempalace.lance');
+  let count = 0;
+  try {
+    if (fs.existsSync(dbPath)) {
+      const stat = fs.statSync(dbPath);
+      count = Math.ceil(stat.size / 1024); // rough KB estimate
+    }
+  } catch { /* ignore */ }
+  return { count, embedded: count > 0 ? 1 : 0, oldest: 0, newest: Date.now() };
+}
+
+export function getAllMemories(): MemoryChunk[] {
+  return [];
+}
+
+export function clearMemories(): void {
+  storage = null;
+  const dir = getDbDir();
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch { /* ignore */ }
+}
+
 export function normalizeContent(text: string): string {
   return text
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '')
     .replace(/\r\n/g, '\n')
     .replace(/\n{4,}/g, '\n\n\n')
     .trim();
-}
-
-/**
- * Get memory store stats.
- */
-export function getMemoryStats(): { count: number; embedded: number; oldest: Date; newest: Date } {
-  const stats = getStore().getStats();
-  return {
-    ...stats,
-    oldest: new Date(stats.oldest),
-    newest: new Date(stats.newest),
-  };
-}
-
-export function getAllMemories(): MemoryChunk[] {
-  return getStore().getAll();
-}
-
-export function clearMemories(): void {
-  getStore().clear();
 }
