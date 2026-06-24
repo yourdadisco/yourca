@@ -30,6 +30,8 @@ import {
   getMemoryStats as getVectorStats,
   buildRagContext,
   clearMemories,
+  type Drawer as MemoryChunk,
+  type SearchHit,
 } from '../services/vectorMemory/index.js';
 
 // ─── MEMDIR Types (Claude Code native) ───
@@ -228,7 +230,7 @@ export function deleteMemory(name: string): boolean {
 export async function searchAllMemories(
   query: string,
   limit: number = 10,
-): Promise<{ vectorResults: Array<{chunk: any; score: number}>; memdirResults: string[] }> {
+): Promise<{ vectorResults: SearchHit[]; memdirResults: string[] }> {
   // Vector memory hybrid search
   const vectorResults = await searchMemories(query, limit);
 
@@ -359,26 +361,31 @@ export async function savePreCompactContext(
  */
 export function getMemoryStats(): {
   memdirFileCount: number;
-  sizeKB: number;
+  vectorSizeKB: number;
   totalEstimatedTokens: number;
 } {
   let memdirFileCount = 0;
   let memdirTotalBytes = 0;
+
   try {
     const memPath = getAutoMemPath();
     if (fs.existsSync(memPath)) {
       const files = fs.readdirSync(memPath).filter(f => f.endsWith('.md'));
       memdirFileCount = files.length;
       for (const file of files) {
-        try { memdirTotalBytes += fs.statSync(path.join(memPath, file)).size; } catch {}
+        try {
+          memdirTotalBytes += fs.statSync(path.join(memPath, file)).size;
+        } catch { /* skip */ }
       }
     }
-  } catch {}
+  } catch { /* skip */ }
+
   const vStats = getVectorStats();
+
   return {
     memdirFileCount,
-    sizeKB: vStats.sizeKB,
-    totalEstimatedTokens: Math.ceil(memdirTotalBytes / 3.5) + (vStats?.sizeKB ?? 0) * 10,
+    vectorSizeKB: vStats.vectorSizeKB,
+    totalEstimatedTokens: Math.ceil(memdirTotalBytes / 3.5) + vStats.vectorSizeKB,
   };
 }
 
