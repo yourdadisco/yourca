@@ -255,6 +255,38 @@ const goalCommand: Command = {
   },
 };
 
+const coordinatorCommand: Command = {
+  type: 'action',
+  name: 'coordinator',
+  description: 'Toggle coordinator mode on/off. In coordinator mode, the model delegates tasks to worker agents.',
+  hidden: false,
+  async action(args) {
+    const { setCoordinatorMode, isCoordinatorMode, setDelmMode, getArchitectureSystemPrompt } =
+      await import('../coordinator/index.js');
+
+    const trimmed = args.trim();
+
+    if (trimmed === 'off' || (trimmed === '' && isCoordinatorMode())) {
+      // Turn off
+      setCoordinatorMode(false);
+      delete process.env.YOURCA_COORDINATOR_MODE;
+      console.log('\n🔄 Coordinator mode: OFF');
+      console.log('   Model will work directly, without spawning workers.');
+    } else if (trimmed === 'on' || trimmed === '' || trimmed === '1') {
+      // Turn on
+      setDelmMode(false);
+      setCoordinatorMode(true);
+      process.env.YOURCA_COORDINATOR_MODE = '1';
+      console.log('\n🔄 Coordinator mode: ON');
+      console.log('   Model will decompose tasks and spawn workers.');
+      console.log('   Use /goal to set an objective for the coordinator to pursue.');
+    } else {
+      console.log(`\nUsage: /coordinator [on|off]`);
+      console.log(`  Current: ${isCoordinatorMode() ? 'ON' : 'OFF'}`);
+    }
+  },
+};
+
 const VERSION = '0.1.0';
 
 const versionCommand: Command = {
@@ -322,6 +354,7 @@ const builtinCommands: Command[] = [
   memoryCommand,
   goalCommand,
   roleCommand,
+  coordinatorCommand,
 ];
 
 export function getAllCommands(): Command[] {
