@@ -13,6 +13,12 @@ import { GrepTool } from './built-in/GrepTool.js';
 import { WebSearchTool } from './built-in/WebSearchTool.js';
 import { WebFetchTool } from './built-in/WebFetchTool.js';
 import { WebBrowserTool } from './built-in/WebBrowserTool.js';
+import {
+  MemoryStore,
+  MemorySearch,
+  MemoryStats,
+  MemoryForget,
+} from './built-in/MemoryTool.js';
 
 const ALL_BASE_TOOLS: readonly Tool[] = [
   BashTool,
@@ -24,6 +30,10 @@ const ALL_BASE_TOOLS: readonly Tool[] = [
   WebSearchTool,
   WebFetchTool,
   WebBrowserTool,
+  MemoryStore,
+  MemorySearch,
+  MemoryStats,
+  MemoryForget,
 ];
 
 /**
