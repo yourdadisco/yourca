@@ -28,12 +28,9 @@ import {
   storeMemory,
   searchMemories,
   getMemoryStats as getVectorStats,
-  getAllMemories,
-  normalizeContent,
   buildRagContext,
-  enhanceSystemPrompt,
   clearMemories,
-  type MemoryChunk,
+  type Drawer as MemoryChunk,
   type SearchHit,
 } from '../services/vectorMemory/index.js';
 
@@ -163,14 +160,14 @@ export async function saveMemory(options: {
 }): Promise<{ memdirPath?: string; vectorIds?: string[] }> {
   const result: { memdirPath?: string; vectorIds?: string[] } = {};
 
-  // 1. Save to Vector Memory (RAG pipeline: chunk → embed → store)
+  // 1. Save to Vector Memory (MemPalace: chunk → embed → store)
   result.vectorIds = await storeMemory(options.content, {
-    source: 'memdir',
-    category: options.type === 'user' ? 'preference' :
-              options.type === 'feedback' ? 'decision' :
-              options.type === 'reference' ? 'reference' : 'fact',
+    wing: 'default',
+    room: 'memdir',
+    hall: options.type === 'user' ? 'preference' :
+          options.type === 'feedback' ? 'decision' :
+          options.type === 'reference' ? 'reference' : 'fact',
     tags: ['memdir', ...(options.tags ?? []), options.type],
-    projectSlug: 'default',
   });
 
   // 2. Save to MEMDIR (markdown file + index)
@@ -351,14 +348,14 @@ export async function savePreCompactContext(
 
   if (recentUserContent) {
     await storeMemory(recentUserContent, {
-      category: 'fact',
+      hall: 'fact',
       tags: ['pre-compact', 'user-requests'],
     });
   }
 
   if (recentAssistantContent) {
     await storeMemory(recentAssistantContent, {
-      category: 'fact',
+      hall: 'fact',
       tags: ['pre-compact', 'assistant-response'],
     });
   }

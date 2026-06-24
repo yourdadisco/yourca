@@ -188,9 +188,10 @@ const memoryCommand: Command = {
       console.log(`\n🔍 Search results for: "${args.trim()}"`);
       console.log(`   Vector memory (RAG): ${results.vectorResults.length} results`);
       for (const r of results.vectorResults) {
-        const age = Math.floor((Date.now() - r.chunk.timestamp) / 86400000);
-        const ageStr = age === 0 ? 'today' : `${age}d ago`;
-        console.log(`   [${Math.round(r.score * 100)}%] ${r.chunk.category}, ${ageStr}`);
+        const age = r.chunk.filedAt
+          ? `${Math.floor((Date.now() - new Date(r.chunk.filedAt).getTime()) / 86400000)}d`
+          : '?';
+        console.log(`   [${Math.round(r.score * 100)}%] ${r.chunk.hall ?? '?'}, ${age}`);
         console.log(`       ${r.chunk.content.slice(0, 150)}...`);
       }
       console.log(`   File memory (MEMDIR): ${results.memdirResults.length} results`);
