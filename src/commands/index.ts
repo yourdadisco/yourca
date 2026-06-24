@@ -176,37 +176,37 @@ const skillsCommand: Command = {
 const memoryCommand: Command = {
   type: 'action',
   name: 'memory',
-  description: 'Show memory stats and search memories (RAG + embedding)',
+  description: 'Search memories or show stats',
   hidden: false,
   async action(args) {
-    const { getMemoryStats, searchAllMemories } = await import('../memory/index.js');
-    const { getMemoryStats: getVectorStats } = await import('../services/vectorMemory/index.js');
+    const { searchMemories, getCurrentWing, getWingStats, getMemoryStats } =
+      await import('../services/vectorMemory/index.js');
 
     if (args.trim()) {
-      // Search using hybrid RAG
-      const results = await searchAllMemories(args.trim(), 10);
-      console.log(`\n🔍 Search results for: "${args.trim()}"`);
-      console.log(`   Vector memory (RAG): ${results.vectorResults.length} results`);
-      for (const r of results.vectorResults) {
+      const results = await searchMemories(args.trim(), 10);
+      if (results.length === 0) {
+        console.log(`\nNo memories found for: "${args.trim()}"`);
+        return;
+      }
+      console.log(`\n🔍 Memories matching: "${args.trim()}"`);
+      for (const r of results) {
         const age = r.chunk.filedAt
           ? `${Math.floor((Date.now() - new Date(r.chunk.filedAt).getTime()) / 86400000)}d`
           : '?';
-        console.log(`   [${Math.round(r.score * 100)}%] ${r.chunk.hall ?? '?'}, ${age}`);
+        console.log(`   [${Math.round(r.score * 100)}%] ${r.chunk.wing}/${r.chunk.room}, ${age}`);
         console.log(`       ${r.chunk.content.slice(0, 150)}...`);
       }
-      console.log(`   File memory (MEMDIR): ${results.memdirResults.length} results`);
-      for (const r of results.memdirResults) {
-        console.log(`   ${r}`);
-      }
     } else {
-      // Stats
-      const stats = getMemoryStats();
-      const vStats = getVectorStats();
-      console.log(`\n🧠 Memory System`);
-      console.log(`   MEMDIR files:          ${stats.memdirFileCount}`);
-      console.log(`   Vector store size:     ${vStats.vectorSizeKB} KB`);
-      console.log(`   Estimated total tokens: ~${stats.totalEstimatedTokens.toLocaleString()}`);
-      console.log(`   Use /memory <query> to search across both stores`);
+      const wing = getCurrentWing();
+      const stats = await getWingStats();
+      const disk = getMemoryStats();
+      console.log(`\n🧠 MemPalace Memory`);
+      console.log(`   Wing:       ${wing}`);
+      console.log(`   Drawers:    ${stats.total}`);
+      console.log(`   Wings:      ${Object.keys(stats.wings).join(', ') || '(none)'}`);
+      console.log(`   Rooms:      ${Object.keys(stats.rooms).length}`);
+      console.log(`   Disk:       ${disk.vectorSizeKB} KB`);
+      console.log(`   Use /memory <query> to search`);
     }
   },
 };
@@ -268,6 +268,45 @@ const versionCommand: Command = {
   },
 };
 
+const roleCommand: Command = {
+  type: 'action',
+  name: 'role',
+  description: 'View or switch wing/role',
+  hidden: false,
+  async action(args) {
+    const { getCurrentWing, setCurrentWing, detectProjectWing, getWingStats } =
+      await import('../services/vectorMemory/index.js');
+
+    const trimmed = args.trim();
+
+    if (trimmed === '--detect') {
+      const detected = detectProjectWing();
+      setCurrentWing(detected);
+      console.log(`\n🔄 Wing re-detected: ${detected}`);
+      return;
+    }
+
+    if (trimmed === '--list') {
+      const stats = await getWingStats();
+      const rooms = Object.keys(stats.rooms);
+      console.log(`\n📋 Rooms in wing "${getCurrentWing()}":`);
+      for (const r of rooms) console.log(`   - ${r}`);
+      return;
+    }
+
+    if (trimmed) {
+      setCurrentWing(trimmed);
+      console.log(`\n🔄 Wing switched to: ${trimmed}`);
+      return;
+    }
+
+    console.log(`\n🎯 Current wing: ${getCurrentWing()}`);
+    console.log(`   Use /role <name> to switch`);
+    console.log(`   Use /role --detect to auto-detect from project`);
+    console.log(`   Use /role --list to show rooms`);
+  },
+};
+
 // ---- Command registry ----
 
 const builtinCommands: Command[] = [
@@ -282,6 +321,7 @@ const builtinCommands: Command[] = [
   versionCommand,
   memoryCommand,
   goalCommand,
+  roleCommand,
 ];
 
 export function getAllCommands(): Command[] {
