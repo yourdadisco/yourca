@@ -205,7 +205,7 @@ const memoryCommand: Command = {
       console.log(`   Drawers:    ${stats.total}`);
       console.log(`   Wings:      ${Object.keys(stats.wings).join(', ') || '(none)'}`);
       console.log(`   Rooms:      ${Object.keys(stats.rooms).length}`);
-      console.log(`   Disk:       ${disk.vectorSizeKB} KB`);
+      console.log(`   Disk:       ${disk.sizeKB} KB`);
       console.log(`   Use /memory <query> to search`);
     }
   },

@@ -196,7 +196,7 @@ export const MemoryStats = buildTool({
               '## Memory Stats',
               '',
               `Total chunks: ${stats.total}`,
-              `Vector DB size: ${memStats.vectorSizeKB} KB`,
+              `Vector DB size: ${memStats.sizeKB} KB`,
               '',
               'By Wing:',
               wingLines.length > 0 ? wingLines.join('\n') : '  (none)',
