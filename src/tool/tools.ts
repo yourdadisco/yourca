@@ -19,6 +19,7 @@ import {
   MemoryStats,
   MemoryForget,
 } from './built-in/MemoryTool.js';
+import { AgentTool } from './built-in/AgentTool.js';
 
 const ALL_BASE_TOOLS: readonly Tool[] = [
   BashTool,
@@ -34,6 +35,7 @@ const ALL_BASE_TOOLS: readonly Tool[] = [
   MemorySearch,
   MemoryStats,
   MemoryForget,
+  AgentTool,
 ];
 
 /**

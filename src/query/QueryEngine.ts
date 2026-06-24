@@ -156,7 +156,7 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
 
     const toolUseContext: ToolUseContext = {
       abortController,
-      getAppState: () => ({}),
+      getAppState: () => ({ tools }),
       setAppState: () => {},
       messages: mutableMessages,
       permissionContext,
