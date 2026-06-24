@@ -118,14 +118,14 @@ const compactCommand: Command = {
 
     const customInstructions = args.trim() || undefined;
 
-    // First: save pre-compact context to vector memory
+    // First: save pre-compact context to vector memory (RAG)
     const { savePreCompactContext } = await import('../memory/index.js');
     const textMessages = msgs.map(m => ({
       role: m.role,
       content: m.content.filter(c => c.type === 'text').map(c => c.text).join('\n'),
     }));
-    savePreCompactContext(textMessages);
-    console.log('   ✓ Pre-compact context saved to vector memory');
+    await savePreCompactContext(textMessages);
+    console.log('   ✓ Pre-compact context saved to RAG vector memory');
 
     // Try session memory compact first (L2, zero API)
     const { getSessionMemoryContent, isSessionMemoryEmpty, buildSessionMemorySummaryMessage } =
@@ -176,33 +176,37 @@ const skillsCommand: Command = {
 const memoryCommand: Command = {
   type: 'action',
   name: 'memory',
-  description: 'Show memory stats and search memories',
+  description: 'Show memory stats and search memories (RAG + embedding)',
   hidden: false,
   async action(args) {
     const { getMemoryStats, searchAllMemories } = await import('../memory/index.js');
-    const { getMemoryCount } = await import('../services/vectorMemory/index.js');
+    const { getMemoryStats: getVectorStats } = await import('../services/vectorMemory/index.js');
 
     if (args.trim()) {
-      // Search
-      const results = searchAllMemories(args.trim(), 10);
+      // Search using hybrid RAG
+      const results = await searchAllMemories(args.trim(), 10);
       console.log(`\n🔍 Search results for: "${args.trim()}"`);
-      console.log(`   Vector memory: ${results.vectorResults.length} results`);
+      console.log(`   Vector memory (RAG): ${results.vectorResults.length} results`);
       for (const r of results.vectorResults) {
-        const age = Math.floor((Date.now() - r.entry.timestamp) / 86400000);
-        console.log(`   [${r.matchType}] ${Math.round(r.score * 100)}% match, ${age}d ago`);
-        console.log(`       ${r.entry.content.slice(0, 120)}...`);
+        const age = Math.floor((Date.now() - r.chunk.timestamp) / 86400000);
+        const ageStr = age === 0 ? 'today' : `${age}d ago`;
+        console.log(`   [${Math.round(r.score * 100)}%] ${r.chunk.category}, ${ageStr}`);
+        console.log(`       ${r.chunk.content.slice(0, 150)}...`);
       }
-      console.log(`   File memory: ${results.memdirResults.length} results`);
+      console.log(`   File memory (MEMDIR): ${results.memdirResults.length} results`);
       for (const r of results.memdirResults) {
         console.log(`   ${r}`);
       }
     } else {
       // Stats
       const stats = getMemoryStats();
+      const vStats = getVectorStats();
       console.log(`\n🧠 Memory System`);
-      console.log(`   File memories (MEMDIR): ${stats.memdirFileCount} files, ~${stats.totalEstimatedTokens} tokens`);
-      console.log(`   Vector entries:          ${getMemoryCount()}`);
-      console.log(`   Use /memory <query> to search`);
+      console.log(`   MEMDIR files:          ${stats.memdirFileCount}`);
+      console.log(`   Vector chunks:         ${vStats.count}`);
+      console.log(`   With embeddings:       ${vStats.embedded}`);
+      console.log(`   Estimated total tokens: ~${stats.totalEstimatedTokens.toLocaleString()}`);
+      console.log(`   Use /memory <query> to search across both stores`);
     }
   },
 };

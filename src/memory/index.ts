@@ -1,5 +1,5 @@
 /**
- * Dual-track Memory System — MEMDIR + Vector Memory.
+ * Dual-track Memory System — MEMDIR + Vector Memory (RAG + Embedding).
  *
  * MEMDIR (Claude Code native):
  *   - Markdown files, human-readable, MEMORY.md index
@@ -7,16 +7,17 @@
  *   - Always in context (MEMORY.md loaded at session start)
  *   - Model writes/reads via tools (Write, Read, Edit)
  *
- * Vector Memory (MemPalace-inspired):
- *   - JSON-file based, keyword search (FTS5-style)
- *   - Used for: long-term, complete history
- *   - Only loaded on demand (search triggered by relevance)
- *   - Automatically populated from conversation and MEMDIR
+ * Vector Memory (MemPalace-compatible):
+ *   - RAG pipeline: chunk → embed → store → retrieve → inject
+ *   - Hybrid search: vector (cosine) + keyword (BM25)
+ *   - Pluggable embedding backends: DeepSeek API / local fallback
+ *   - Auto-chunking with overlap, temporal decay scoring
+ *   - Used for: long-term, semantic search across all memories
  *
  * INTEGRATION:
- *   - MEMDIR content is also indexed in Vector Memory
- *   - Vector Memory enables fuzzy search across all memories
- *   - Before compact: auto-save current context to vector store
+ *   - MEMDIR content also auto-indexed into Vector Memory
+ *   - buildRagContext() injects relevant memories into system prompt
+ *   - Pre-compact hook saves current context to vector store
  */
 
 import * as fs from 'fs';
@@ -26,14 +27,15 @@ import { getProjectRoot } from '../state/bootstrap.js';
 import {
   storeMemory,
   searchMemories,
-  getMemoryCount,
+  getMemoryStats as getVectorStats,
   getAllMemories,
-  trimMemories,
-  buildMemoryContext,
-  normalizeMemoryContent,
-  storeConversationMemory,
-  type MemoryEntry,
-  type SearchResult,
+  normalizeContent,
+  buildRagContext,
+  enhanceSystemPrompt,
+  clearMemories,
+  setEmbeddingProvider,
+  type MemoryChunk,
+  type SearchHit,
 } from '../services/vectorMemory/index.js';
 
 // ─── MEMDIR Types (Claude Code native) ───
@@ -151,24 +153,25 @@ export function appendMemoryIndex(line: string): boolean {
 /**
  * Save a memory to BOTH MEMDIR (if readable) and Vector Memory (always).
  * MEMDIR: writes a markdown file + appends to MEMORY.md index
- * Vector: indexes content for search
+ * Vector: chunks + embeds + indexes content for RAG search
  */
-export function saveMemory(options: {
+export async function saveMemory(options: {
   name: string;
   description: string;
   content: string;
   type: MemoryType;
   tags?: string[];
-}): { memdirPath?: string; vectorId?: string } {
-  const result: { memdirPath?: string; vectorId?: string } = {};
+}): Promise<{ memdirPath?: string; vectorIds?: string[] }> {
+  const result: { memdirPath?: string; vectorIds?: string[] } = {};
 
-  // 1. Save to Vector Memory (always)
-  storeConversationMemory(options.content, {
+  // 1. Save to Vector Memory (RAG pipeline: chunk → embed → store)
+  result.vectorIds = await storeMemory(options.content, {
     source: 'memdir',
-    type: options.type === 'user' ? 'preference' :
-          options.type === 'feedback' ? 'decision' :
-          options.type === 'reference' ? 'reference' : 'fact',
+    category: options.type === 'user' ? 'preference' :
+              options.type === 'feedback' ? 'decision' :
+              options.type === 'reference' ? 'reference' : 'fact',
     tags: ['memdir', ...(options.tags ?? []), options.type],
+    projectSlug: 'default',
   });
 
   // 2. Save to MEMDIR (markdown file + index)
@@ -228,14 +231,15 @@ export function deleteMemory(name: string): boolean {
 
 /**
  * Search across BOTH memory systems.
- * First tries vector search (keyword), then falls back to MEMDIR grep.
+ * Vector Memory uses hybrid search (cosine similarity + BM25 + temporal decay).
+ * MEMDIR grep fallback for exact matches.
  */
-export function searchAllMemories(
+export async function searchAllMemories(
   query: string,
   limit: number = 10,
-): { vectorResults: SearchResult[]; memdirResults: string[] } {
-  // Vector memory search
-  const vectorResults = searchMemories(query, limit);
+): Promise<{ vectorResults: SearchHit[]; memdirResults: string[] }> {
+  // Vector memory hybrid search
+  const vectorResults = await searchMemories(query, limit);
 
   // MEMDIR grep fallback
   const memdirResults: string[] = [];
@@ -248,7 +252,6 @@ export function searchAllMemories(
         const content = fs.readFileSync(path.join(memPath, file), 'utf-8');
         if (terms.some(t => content.toLowerCase().includes(t))) {
           const name = file.replace(/\.md$/, '');
-          // Extract description from frontmatter
           const descMatch = content.match(/description:\s*(.+)/);
           memdirResults.push(`- [${name}](${file})${descMatch ? ` — ${descMatch[1]}` : ''}`);
         }
@@ -263,29 +266,30 @@ export function searchAllMemories(
 
 /**
  * Build the unified memory prompt for system prompt injection.
- * Combines MEMDIR index (always loaded) + vector memory context (on-demand).
+ * Combines MEMDIR index (always loaded) + RAG vector memory context (on-demand query).
  */
-export function buildMemoryPrompt(
+export async function buildMemoryPrompt(
   displayName?: string,
   query?: string,
-): string {
+): Promise<string> {
   ensureMemoryDirExists();
   const memPath = getAutoMemPath();
   const name = displayName ?? 'YourCA';
 
   const parts: string[] = [
-    `## Memory System (Dual-Track)`,
+    `## Memory System (Dual-Track: MEMDIR + RAG Vector Store)`,
     ``,
     `${name} has two memory systems working together:`,
     ``,
     `**1. File Memory (MEMDIR)** — \`${memPath}\``,
-    `   Human-readable markdown files, always partially loaded.`,
-    `   Each file has YAML frontmatter with type: user | feedback | project | reference.`,
+    `   Human-readable markdown files, always partially loaded in context.`,
+    `   Each file has YAML frontmatter with type: user \| feedback \| project \| reference.`,
     `   Use Write/Read/Edit tools to manage these files directly.`,
     ``,
-    `**2. Searchable Memory (Vector Store)** — Semantic keyword search across all memories.`,
-    `   Automatically indexed from conversations and file memories.`,
-    `   Access via: query the system for relevant memories when starting new tasks.`,
+    `**2. RAG Vector Memory** — Auto-chunked, embedded, hybrid search.`,
+    `   Conversations and file memories are automatically indexed.`,
+    `   Retrieves relevant chunks via semantic similarity + BM25 keyword.`,
+    `   Inject result: via buildRagContext() into system prompt.`,
     ``,
     `Rules for saving to MEMDIR:`,
     `- Use \`Write\` to create memory files with YAML frontmatter`,
@@ -313,11 +317,11 @@ export function buildMemoryPrompt(
     parts.push('', '## Existing File Memories', existing.content);
   }
 
-  // Add vector memory context if query provided
+  // Add RAG vector memory context if query provided
   if (query) {
-    const vecContext = buildMemoryContext(query, 5);
-    if (vecContext) {
-      parts.push('', vecContext);
+    const ragContext = await buildRagContext(query, 5);
+    if (ragContext) {
+      parts.push('', ragContext);
     }
   }
 
@@ -326,10 +330,11 @@ export function buildMemoryPrompt(
 
 /**
  * Pre-compact hook: save important context to vector memory before compaction.
- * This ensures information survives compact.
+ * This ensures information survives compact via RAG retrieval.
  */
-export function savePreCompactContext(messages: Array<{ role: string; content: string }>): void {
-  // Extract user messages and assistant summaries
+export async function savePreCompactContext(
+  messages: Array<{ role: string; content: string }>,
+): Promise<void> {
   const userMessages: string[] = [];
   const assistantSummaries: string[] = [];
 
@@ -341,20 +346,20 @@ export function savePreCompactContext(messages: Array<{ role: string; content: s
     }
   }
 
-  // Save condensed version to vector memory
+  // Save condensed version to vector memory (RAG pipeline)
   const recentUserContent = userMessages.slice(-3).join('\n---\n');
   const recentAssistantContent = assistantSummaries.slice(-3).join('\n---\n');
 
   if (recentUserContent) {
-    storeConversationMemory(recentUserContent, {
-      type: 'fact',
+    await storeMemory(recentUserContent, {
+      category: 'fact',
       tags: ['pre-compact', 'user-requests'],
     });
   }
 
   if (recentAssistantContent) {
-    storeConversationMemory(recentAssistantContent, {
-      type: 'fact',
+    await storeMemory(recentAssistantContent, {
+      category: 'fact',
       tags: ['pre-compact', 'assistant-response'],
     });
   }
@@ -366,6 +371,7 @@ export function savePreCompactContext(messages: Array<{ role: string; content: s
 export function getMemoryStats(): {
   memdirFileCount: number;
   vectorEntryCount: number;
+  vectorEmbeddedCount: number;
   totalEstimatedTokens: number;
 } {
   let memdirFileCount = 0;
@@ -384,10 +390,13 @@ export function getMemoryStats(): {
     }
   } catch { /* skip */ }
 
+  const vStats = getVectorStats();
+
   return {
     memdirFileCount,
-    vectorEntryCount: getMemoryCount(),
-    totalEstimatedTokens: Math.ceil(memdirTotalBytes / 3.5) + getMemoryCount() * 100,
+    vectorEntryCount: vStats.count,
+    vectorEmbeddedCount: vStats.embedded,
+    totalEstimatedTokens: Math.ceil(memdirTotalBytes / 3.5) + vStats.count * 100,
   };
 }
 
