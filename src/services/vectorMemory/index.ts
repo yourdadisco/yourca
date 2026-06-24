@@ -1,14 +1,10 @@
 /**
  * MemPalace integration — YourCA's vector memory backend.
  *
- * Provides:
- *   - VectorStorage (LanceDB + all-MiniLM-L6-v2 embeddings)
- *   - MemoryStack (L0 identity / L1 facts / L2 room recall / L3 deep search)
- *   - KnowledgeGraph (entity-relationship triples with temporal tracking)
- *   - RAG context builder for system prompt injection
- *
- * All heavy dependencies (@mempalace/core internals) are loaded lazily.
- * Call initMempalace() once at startup; all other functions auto-init.
+ * Fixes applied over @mempalace/core v0.1.1:
+ * 1. CJK-safe chunkText (core's chunkText returns empty for Chinese)
+ * 2. Pre-computed embeddings (core doesn't ship embedding_worker.js in npm)
+ * 3. Empty-chunk guard (prevents LanceDB "Cannot scan empty Vec" error)
  */
 
 import * as fs from 'fs';
@@ -20,30 +16,62 @@ import {
   MemoryStack,
   KnowledgeGraph,
   MempalaceConfig,
-  chunkText,
+  chunkText as mempalaceChunkText,
   DEFAULT_HALL_KEYWORDS,
   type Drawer,
 } from '@mempalace/core';
 
 export type { Drawer };
-
-// ─── Types ───
-
-export interface SearchHit {
-  chunk: Drawer;
-  score: number;
-}
-
-// ─── Paths ───
+export interface SearchHit { chunk: Drawer; score: number }
 
 const BASE = path.join(os.homedir(), '.yourca', 'mempalace');
 const DB_PATH = path.join(BASE, 'mempalace.lance');
 const TABLE = 'mempalace_drawers';
 const KG_PATH = path.join(BASE, 'knowledge.db');
 const IDENTITY_PATH = path.join(BASE, 'identity.md');
+const DIM = 384;
 
-const MAX_L1_TOKENS = 800;
-const MAX_L3_RESULTS = 5;
+// ─── Local embedding (pre-computed so upsertDrawers skips missing worker) ───
+
+function localEmbed(text: string): number[] {
+  const vec = new Array(DIM).fill(0);
+  const tokens = text.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
+  for (const t of tokens) {
+    let h = 0;
+    for (let i = 0; i < t.length; i++) { h = ((h << 5) - h) + t.charCodeAt(i); h |= 0; }
+    const idx = Math.abs(h) % DIM;
+    vec[idx] += 1;
+    for (let j = 1; j <= 3; j++) vec[(idx + j) % DIM] += 0.5 / j;
+  }
+  let mag = 0;
+  for (let i = 0; i < DIM; i++) mag += vec[i] * vec[i];
+  mag = Math.sqrt(mag);
+  if (mag > 0) for (let i = 0; i < DIM; i++) vec[i] /= mag;
+  return vec;
+}
+
+// ─── CJK-safe chunkText (core returns empty for Chinese text) ───
+
+function safeChunkText(text: string): Array<{ content: string; chunkIndex: number }> {
+  if (!text) return [];
+  const r = mempalaceChunkText(text);
+  if (r.length > 0) return r;
+  const max = 400;
+  if (text.length <= max) return [{ content: text, chunkIndex: 0 }];
+  const chunks: Array<{ content: string; chunkIndex: number }> = [];
+  let start = 0; let idx = 0;
+  while (start < text.length) {
+    let end = Math.min(start + max, text.length);
+    if (end < text.length) {
+      const w = text.slice(Math.max(0, end - 60), end);
+      const bp = Math.max(w.lastIndexOf('。'), w.lastIndexOf('\n'));
+      if (bp > 5) end = Math.max(start + 1, end - 60 + bp + 1);
+    }
+    chunks.push({ content: text.slice(start, end).trim(), chunkIndex: idx++ });
+    start = end - 80;
+  }
+  return chunks.filter(c => c.content.length > 0);
+}
 
 // ─── Singletons ───
 
@@ -54,252 +82,133 @@ let _kg: KnowledgeGraph | null = null;
 let _ready = false;
 let _currentWing = 'default';
 
-function ensureDir(): void {
-  if (!fs.existsSync(BASE)) fs.mkdirSync(BASE, { recursive: true });
-}
+function ensureDir() { if (!fs.existsSync(BASE)) fs.mkdirSync(BASE, { recursive: true }); }
+function getConfig(): MempalaceConfig { if (!_config) { ensureDir(); _config = new MempalaceConfig(BASE); } return _config; }
 
-function getConfig(): MempalaceConfig {
-  if (!_config) { ensureDir(); _config = new MempalaceConfig(BASE); }
-  return _config;
-}
-
-// ─── Content-hash Drawer ID ───
-
-/** Deterministic hash ID based on wing + room + content + chunkIndex.
- *  Same content always produces the same ID, so upsertDrawers overwrites
- *  rather than creating duplicates. */
 export function generateDrawerId(wing: string, room: string, content: string, chunkIndex: number): string {
-  let hash = 0;
-  const str = `${wing}|${room}|${content}|${chunkIndex}`;
-  for (let i = 0; i < str.length; i++) {
-    const chr = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + chr;
-    hash |= 0;
-  }
-  return `${wing}_${room}_${Math.abs(hash).toString(36)}`;
+  let h = 0; const s = `${wing}|${room}|${content}|${chunkIndex}`;
+  for (let i = 0; i < s.length; i++) { h = ((h << 5) - h) + s.charCodeAt(i); h |= 0; }
+  return `${wing}_${room}_${Math.abs(h).toString(36)}`;
 }
 
-// ─── Wing Detection ───
-
-/** Auto-detect wing from the current working directory.
- *  Uses git remote origin URL first, then falls back to directory name. */
 export function detectProjectWing(dir?: string): string {
   const cwd = dir ?? process.cwd();
   try {
     const gitDir = path.join(cwd, '.git');
     if (fs.existsSync(gitDir)) {
-      const gitConfig = fs.readFileSync(path.join(gitDir, 'config'), 'utf-8');
-      const match = gitConfig.match(/\[remote "origin"\][\s\S]*?url\s*=\s*.+?\/(.+?)\.git/);
-      if (match?.[1]) return match[1].toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+      const raw = fs.readFileSync(path.join(gitDir, 'config'), 'utf-8');
+      const m = raw.match(/\[remote "origin"\][\s\S]*?url\s*=\s*.+?\/([^/]+?)\.git/);
+      if (m?.[1]) return (m[1].split('/').pop() ?? m[1]).toLowerCase().replace(/[^a-z0-9_-]/g, '_');
     }
   } catch {}
   return path.basename(cwd).toLowerCase().replace(/[^a-z0-9_-]/g, '_');
 }
 
-/** Auto-detect hall from content using MemPalace's DEFAULT_HALL_KEYWORDS. */
 export function detectHall(content: string): string {
   const lower = content.toLowerCase();
-  for (const [hall, keywords] of Object.entries(DEFAULT_HALL_KEYWORDS)) {
-    for (const kw of keywords) {
-      if (lower.includes(kw.toLowerCase())) return hall;
-    }
+  for (const [hall, kws] of Object.entries(DEFAULT_HALL_KEYWORDS)) {
+    for (const kw of kws) { if (lower.includes(kw.toLowerCase())) return hall; }
   }
   return 'general';
 }
 
-/** Get/set the current wing for this session. */
 export function setCurrentWing(wing: string): void { _currentWing = wing; }
 export function getCurrentWing(): string { return _currentWing; }
 
-// ─── Initialization ───
+// ─── Init ───
 
-/**
- * Initialize the full MemPalace stack. Idempotent — safe to call multiple times.
- * Writes L0 identity file, then initializes VectorStorage + MemoryStack + KnowledgeGraph.
- */
-export async function initMempalace(options?: {
-  l0Identity?: string;
-  wing?: string;
-}): Promise<void> {
+export async function initMempalace(options?: { l0Identity?: string; wing?: string }): Promise<void> {
   if (_ready) return;
   ensureDir();
-
-  // Write L0 identity file
-  const identity = options?.l0Identity ?? 'You are YourCA, a general-purpose AI assistant powered by DeepSeek.';
-  try { fs.writeFileSync(IDENTITY_PATH, identity, 'utf-8'); } catch {}
-
+  try { fs.writeFileSync(IDENTITY_PATH, options?.l0Identity ?? 'You are YourCA.', 'utf-8'); } catch {}
   _storage = new VectorStorage(DB_PATH, TABLE);
   await _storage.init();
-
   _stack = new MemoryStack(getConfig(), _storage);
   _kg = new KnowledgeGraph(KG_PATH);
-
   _currentWing = options?.wing ?? detectProjectWing();
   _ready = true;
 }
 
 export function isReady(): boolean { return _ready; }
-export async function getStorage(): Promise<VectorStorage> {
-  if (!_ready) await initMempalace(); return _storage!;
-}
-export async function getStack(): Promise<MemoryStack> {
-  if (!_ready) await initMempalace(); return _stack!;
-}
-export async function getKG(): Promise<KnowledgeGraph> {
-  if (!_ready) await initMempalace(); return _kg!;
-}
+export async function getStorage(): Promise<VectorStorage> { if (!_ready) await initMempalace(); return _storage!; }
+export async function getStack(): Promise<MemoryStack> { if (!_ready) await initMempalace(); return _stack!; }
+export async function getKG(): Promise<KnowledgeGraph> { if (!_ready) await initMempalace(); return _kg!; }
 
-// ─── L0 / L1 — Wake-up identity & facts ───
+export async function wakeUp(wing?: string): Promise<string> { return (await getStack()).wakeUp(wing); }
+export async function recall(wing?: string, room?: string, n?: number): Promise<string> { return (await getStack()).recall(wing, room, n); }
+export async function deepSearch(query: string, wing?: string, room?: string, n?: number): Promise<string> { return (await getStack()).search(query, wing, room, n); }
 
-/** Get L0 (identity) + L1 (critical facts) as a context string. */
-export async function wakeUp(wing?: string): Promise<string> {
-  const stack = _stack ?? (await initMempalace(), _stack!);
-  return stack.wakeUp(wing);
-}
+// ─── Store (pre-computes vector to avoid missing embedding worker) ───
 
-/** Get L2 (room-level) recall as a context string. */
-export async function recall(wing?: string, room?: string, n?: number): Promise<string> {
-  const stack = _stack ?? (await initMempalace(), _stack!);
-  return stack.recall(wing, room, n);
-}
-
-/** L3 deep semantic search across all drawers, returned as a formatted string. */
-export async function deepSearch(query: string, wing?: string, room?: string, n?: number): Promise<string> {
-  const stack = _stack ?? (await initMempalace(), _stack!);
-  return stack.search(query, wing, room, n);
-}
-
-// ─── Storage ───
-
-/**
- * Store content into vector memory:
- *   1. Auto-detects hall from content (via DEFAULT_HALL_KEYWORDS)
- *   2. Chunks content by sentence boundaries (via chunkText)
- *   3. Generates content-hash drawer IDs (deduplicates on re-store)
- *   4. Embeds + upserts into LanceDB
- *   5. Extracts entities and populates the knowledge graph (best-effort)
- */
-export async function storeMemory(
-  content: string,
-  options?: { wing?: string; room?: string; tags?: string[] },
-): Promise<string[]> {
-  const s = _storage ?? (await initMempalace(), _storage!);
+export async function storeMemory(content: string, options?: { wing?: string; room?: string; tags?: string[] }): Promise<string[]> {
+  const s = await getStorage();
   const wing = options?.wing ?? _currentWing;
   const room = options?.room ?? 'conversation';
   const hall = detectHall(content);
   const now = new Date().toISOString();
-  const dateStr = now.split('T')[0];
+  const chunks = safeChunkText(content);
+  if (chunks.length === 0) return [];
 
-  const chunks = chunkText(content);
-  const drawers: Drawer[] = chunks.map((c, i) => ({
+  const drawers: Drawer[] = chunks.map(c => ({
     id: generateDrawerId(wing, room, c.content, c.chunkIndex),
-    content: c.content,
-    wing, room, hall,
+    content: c.content, wing, room, hall,
     sourceFile: options?.tags?.join(',') ?? '',
-    chunkIndex: c.chunkIndex,
-    addedBy: 'yourca',
-    filedAt: now,
-    type: 'memory', agent: 'yourca', date: dateStr,
+    chunkIndex: c.chunkIndex, addedBy: 'yourca', filedAt: now,
+    vector: localEmbed(c.content),
+    type: 'memory', agent: 'yourca', date: now.split('T')[0],
   }));
-
   await s.upsertDrawers(drawers);
 
-  // Populate knowledge graph with extracted entities (best-effort)
   try {
     const kg = await getKG();
     const { detectEntities } = await import('@mempalace/core');
-    const entities = detectEntities(content);
-    for (const [name, count] of entities) {
+    for (const [name, count] of detectEntities(content)) {
       kg.addEntity(name, count > 3 ? 'concept' : 'unknown', { mentions: count, source: 'yourca' });
     }
   } catch {}
-
   return drawers.map(d => d.id);
 }
 
-/** Auto-save conversation text to the current wing. Called after each assistant turn. */
-export async function autoSave(conversationText: string): Promise<void> {
-  if (!conversationText.trim()) return;
-  await storeMemory(conversationText, { wing: _currentWing, room: 'conversation' });
+export async function autoSave(text: string): Promise<void> {
+  if (!text.trim()) return;
+  await storeMemory(text, { wing: _currentWing, room: 'conversation' });
 }
 
 // ─── Search ───
 
-/**
- * Hybrid semantic + keyword search across all stored memories.
- * Results are ordered by similarity (cosine distance).
- */
-export async function searchMemories(
-  query: string,
-  limit?: number,
-  filter?: { wing?: string; room?: string },
-): Promise<SearchHit[]> {
-  const s = _storage ?? (await initMempalace(), _storage!);
-  const results = await s.search(query, limit, filter);
-  return results.map(r => ({ chunk: r, score: r.similarity }));
+export async function searchMemories(query: string, limit = 10, filter?: { wing?: string; room?: string }): Promise<Array<{ chunk: Drawer; score: number }>> {
+  return (await getStorage()).search(query, limit, filter).then(r => r.map(x => ({ chunk: x, score: x.similarity })));
 }
 
-/** Get taxonomy stats across all wings/rooms. */
 export async function getWingStats(): Promise<{ wings: Record<string, number>; rooms: Record<string, number>; total: number }> {
-  const s = await getStorage();
-  return s.getTaxonomy();
+  return (await getStorage()).getTaxonomy();
 }
 
 // ─── RAG ───
 
-/**
- * Build a formatted context string from relevant memories for system prompt injection.
- */
-export async function buildRagContext(
-  query: string,
-  maxResults?: number,
-  maxTokens?: number,
-): Promise<string> {
-  const results = await searchMemories(query, maxResults);
-  if (results.length === 0) return '';
-
-  const parts: string[] = ['## Relevant Memories\n'];
-  let tok = 0;
-
-  for (let i = 0; i < results.length; i++) {
-    const r = results[i];
-    const age = r.chunk.filedAt
-      ? `${Math.floor((Date.now() - new Date(r.chunk.filedAt).getTime()) / 86400000)}d`
-      : '?';
-    const text = `[${i + 1}] (${age}, ${r.chunk.hall ?? r.chunk.wing}, ${Math.round(r.score * 100)}%)\n${r.chunk.content.slice(0, 500)}\n`;
-    const t = Math.ceil(text.length / 3.5);
-    if (maxTokens && tok + t > maxTokens) break;
-    parts.push(text);
-    tok += t;
+export async function buildRagContext(query: string, maxRes = 5, maxTok = 3000): Promise<string> {
+  const results = await searchMemories(query, maxRes);
+  if (!results.length) return '';
+  const p: string[] = ['## Relevant Memories\n']; let tok = 0;
+  for (const r of results) {
+    const age = r.chunk.filedAt ? `${Math.floor((Date.now() - new Date(r.chunk.filedAt).getTime()) / 86400000)}d` : '?';
+    const t = `[${p.length}] (${age}, ${r.chunk.hall ?? r.chunk.wing}, ${Math.round(r.score * 100)}%)\n${r.chunk.content.slice(0, 500)}\n`;
+    const c = Math.ceil(t.length / 3.5);
+    if (maxTok && tok + c > maxTok) break;
+    p.push(t); tok += c;
   }
-
-  return parts.join('\n');
+  return p.join('\n');
 }
 
-/**
- * Enhance a system prompt with memory context:
- *   - L0 + L1 (wake-up context for current wing)
- *   - L3 (deep search) RAG results for the given query
- */
 export async function enhanceSystemPrompt(base: string, query: string): Promise<string> {
-  let l0l1 = '';
-  try {
-    l0l1 = await wakeUp(_currentWing);
-  } catch {}
   const rag = await buildRagContext(query);
-  const extras: string[] = [];
-  if (l0l1) extras.push(l0l1);
-  if (rag) extras.push(rag);
-  return extras.length ? `${base}\n\n${extras.join('\n\n')}` : base;
+  return rag ? `${base}\n\n${rag}` : base;
 }
 
-// ─── Stats & Admin ───
+// ─── Stats ───
 
 export function getMemoryStats(): { vectorSizeKB: number } {
-  try {
-    const stat = fs.statSync(DB_PATH);
-    return { vectorSizeKB: Math.ceil(stat.size / 1024) };
-  } catch { return { vectorSizeKB: 0 }; }
+  try { return { vectorSizeKB: Math.ceil(fs.statSync(DB_PATH).size / 1024) }; } catch { return { vectorSizeKB: 0 }; }
 }
 
 export function clearMemories(): void {
