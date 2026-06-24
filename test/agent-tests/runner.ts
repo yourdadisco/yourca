@@ -107,9 +107,16 @@ async function main(): Promise<void> {
   }
 
   const ts = new Date().toISOString().split('T')[0];
-  const rf = path.join(RESULTS_DIR, `${ts}-all.json`);
-  fs.writeFileSync(rf, JSON.stringify(allResults, null, 2), 'utf-8');
-  console.log(`\nResults saved to: ${rf}`);
+  // Merge with existing results from other modes
+  let existing: any[] = [];
+  const existingFile = path.join(RESULTS_DIR, `${ts}-all.json`);
+  if (fs.existsSync(existingFile)) {
+    try { existing = JSON.parse(fs.readFileSync(existingFile, 'utf-8')); } catch {}
+  }
+  // Replace same-mode results, keep others
+  const merged = existing.filter((x: any) => !modes.some(m => m.mode === x.mode)).concat(allResults);
+  fs.writeFileSync(existingFile, JSON.stringify(merged, null, 2), 'utf-8');
+  console.log(`\nResults saved to: ${existingFile}`);
 
   console.log('\n── Comparison ──\n');
   const h = `Task${' '.repeat(12)} | tok${' '.repeat(8)} | time${' '.repeat(7)} | tools`;

@@ -20,6 +20,8 @@ import { microcompactMessages, autoCompactIfNeeded, shouldAutoCompact, buildPost
 import { classifyError, logError } from '../services/errors.js';
 import { createUserMessage } from './messages.js';
 import { enhanceSystemPrompt, autoSave } from '../services/vectorMemory/index.js';
+import { getArchitectureSystemPrompt } from '../coordinator/index.js';
+import { isGoalModeActive, buildGoalSystemPrompt } from '../services/goalEngine.js';
 
 const DEEPSEEK_PRICING = { input: 0.00027, output: 0.0011 };
 const MAX_TURNS = 50;
@@ -174,7 +176,16 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
       const queryText = lastUserMsg
         ? lastUserMsg.content.filter(c => c.type === 'text').map(c => c.text).join(' ')
         : '';
-      const enhancedPrompt = await enhanceSystemPrompt(systemPrompt, queryText).catch(() => systemPrompt);
+      // Inject architecture-specific prompt (coordinator/delm/normal)
+      let finalPrompt = systemPrompt;
+      const archPrompt = getArchitectureSystemPrompt();
+      if (archPrompt) finalPrompt += '\n\n' + archPrompt;
+      // Inject goal prompt if /goal is active
+      if (isGoalModeActive()) {
+        const goalPrompt = buildGoalSystemPrompt();
+        if (goalPrompt) finalPrompt += '\n\n' + goalPrompt;
+      }
+      const enhancedPrompt = await enhanceSystemPrompt(finalPrompt, queryText).catch(() => finalPrompt);
       result = await streamChatCompletion(enhancedPrompt, apiMessages, apiTools, {
         signal: abortController.signal,
         model,

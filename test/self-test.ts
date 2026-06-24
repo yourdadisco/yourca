@@ -22,7 +22,7 @@ function printResult(name: string, status: TestStatus, detail?: string): void {
   results.push({ name, status, detail });
   completed++;
 
-  if (completed === TOTAL_TESTS) {
+  if (completed >= TOTAL_TESTS) {
     const passed = results.filter(r => r.status === 'passed').length;
     const failed = results.filter(r => r.status === 'failed').length;
     console.log('\n  \x1b[1mResults: \x1b[32m' + passed + ' passed\x1b[0m, \x1b[31m' + failed + ' failed\x1b[0m\n');
