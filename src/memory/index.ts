@@ -366,8 +366,7 @@ export async function savePreCompactContext(
  */
 export function getMemoryStats(): {
   memdirFileCount: number;
-  vectorEntryCount: number;
-  vectorEmbeddedCount: number;
+  vectorSizeKB: number;
   totalEstimatedTokens: number;
 } {
   let memdirFileCount = 0;
@@ -390,9 +389,8 @@ export function getMemoryStats(): {
 
   return {
     memdirFileCount,
-    vectorEntryCount: vStats.count,
-    vectorEmbeddedCount: vStats.embedded,
-    totalEstimatedTokens: Math.ceil(memdirTotalBytes / 3.5) + vStats.count * 100,
+    vectorSizeKB: vStats.vectorSizeKB,
+    totalEstimatedTokens: Math.ceil(memdirTotalBytes / 3.5) + vStats.vectorSizeKB,
   };
 }
 

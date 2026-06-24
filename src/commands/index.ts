@@ -204,8 +204,7 @@ const memoryCommand: Command = {
       const vStats = getVectorStats();
       console.log(`\n🧠 Memory System`);
       console.log(`   MEMDIR files:          ${stats.memdirFileCount}`);
-      console.log(`   Vector chunks:         ${vStats.count}`);
-      console.log(`   With embeddings:       ${vStats.embedded}`);
+      console.log(`   Vector store size:     ${vStats.vectorSizeKB} KB`);
       console.log(`   Estimated total tokens: ~${stats.totalEstimatedTokens.toLocaleString()}`);
       console.log(`   Use /memory <query> to search across both stores`);
     }

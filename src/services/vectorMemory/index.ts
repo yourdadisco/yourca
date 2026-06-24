@@ -1,53 +1,123 @@
 /**
- * MemPalace Integration — direct re-export of @mempalace/core.
+ * MemPalace — full embedded integration of @mempalace/core.
  *
- * This file is a thin convenience layer that:
- * 1. Re-exports @mempalace/core's types and classes directly
- * 2. Provides a singleton VectorStorage pre-initialized for yourca
- * 3. Adds RAG prompt formatting (buildRagContext)
+ * Uses every feature available:
+ *   VectorStorage  → LanceDB vector store (all-MiniLM-L6-v2)
+ *   MemoryStack    → L0 (identity) + L1 (facts) + L2 (rooms) + L3 (deep search)
+ *   KnowledgeGraph → entity-relationship triples with temporal tracking
+ *   chunkText      → sentence-boundary chunking
+ *   mineDirectory  → automatic project file indexing
+ *   detectEntities → entity extraction from content
+ *
+ * MIT license, open source, npm installed — nothing to stop us.
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-import { VectorStorage, chunkText } from '@mempalace/core';
-import type { Drawer } from '@mempalace/core';
+import {
+  VectorStorage,
+  MemoryStack,
+  KnowledgeGraph,
+  MempalaceConfig,
+  chunkText,
+  mineDirectory,
+  scanProject,
+  detectEntities,
+  buildGraph,
+  traverseGraph,
+  type Drawer,
+  type Entity,
+  type Triple,
+} from '@mempalace/core';
 
-// ─── Re-export MemPalace types directly ───
+// ─── Re-export ───
 
-export type { Drawer };
-export { VectorStorage, chunkText };
+export type { Drawer, Entity, Triple };
+export { VectorStorage, MemoryStack, KnowledgeGraph, MempalaceConfig, chunkText, mineDirectory, scanProject, detectEntities, buildGraph, traverseGraph };
+
+// ─── Types ───
 
 export interface SearchHit {
   chunk: Drawer;
   score: number;
 }
 
-// ─── Singleton storage ───
+// ─── Paths ───
 
+const BASE = path.join(os.homedir(), '.yourca', 'mempalace');
+const DB_PATH = path.join(BASE, 'mempalace.lance');
+const TABLE = 'mempalace_drawers';
+const KG_PATH = path.join(BASE, 'knowledge.db');
+
+// ─── Singletons ───
+
+let _config: MempalaceConfig | null = null;
 let _storage: VectorStorage | null = null;
+let _stack: MemoryStack | null = null;
+let _kg: KnowledgeGraph | null = null;
+let _ready = false;
 
-function dbDir(): string {
-  const dir = path.join(os.homedir(), '.yourca', 'mempalace');
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  return dir;
+function ensure(): void { if (!fs.existsSync(BASE)) fs.mkdirSync(BASE, { recursive: true }); }
+function cfg(): MempalaceConfig { if (!_config) { ensure(); _config = new MempalaceConfig(BASE); } return _config; }
+
+/**
+ * Initialize the full MemPalace stack. Call once at startup.
+ */
+export async function initMempalace(): Promise<void> {
+  if (_ready) return;
+  ensure();
+
+  _storage = new VectorStorage(DB_PATH, TABLE);
+  await _storage.init();
+
+  _stack = new MemoryStack(cfg(), _storage);
+
+  _kg = new KnowledgeGraph(KG_PATH);
+
+  _ready = true;
 }
+
+export function isReady(): boolean { return _ready; }
 
 export async function getStorage(): Promise<VectorStorage> {
-  if (!_storage) {
-    _storage = new VectorStorage(
-      path.join(dbDir(), 'mempalace.lance'),
-      'mempalace_drawers',
-    );
-    await _storage.init();
-  }
-  return _storage;
+  if (!_ready) await initMempalace();
+  return _storage!;
 }
 
-// ─── High-level convenience API ───
+export async function getStack(): Promise<MemoryStack> {
+  if (!_ready) await initMempalace();
+  return _stack!;
+}
 
-/** Store content: chunks + embeds + persists via MemPalace. */
+export async function getKG(): Promise<KnowledgeGraph> {
+  if (!_ready) await initMempalace();
+  return _kg!;
+}
+
+// ─── L0 / L1 — Wake-up context ───
+
+/** Get L0 (identity) + L1 (critical facts) as a wake-up string. */
+export async function wakeUp(wing?: string): Promise<string> {
+  const stack = await getStack();
+  return stack.wakeUp(wing);
+}
+
+/** Get L2 room recall as a context string. */
+export async function recall(wing?: string, room?: string, n?: number): Promise<string> {
+  const stack = await getStack();
+  return stack.recall(wing, room, n);
+}
+
+/** L3 deep search across all drawers. */
+export async function deepSearch(query: string, wing?: string, room?: string, n?: number): Promise<string> {
+  const stack = await getStack();
+  return stack.search(query, wing, room, n);
+}
+
+// ─── Storage ───
+
 export async function storeMemory(
   content: string,
   options?: { wing?: string; room?: string; hall?: string; tags?: string[] },
@@ -57,7 +127,6 @@ export async function storeMemory(
   const room = options?.room ?? 'conversation';
   const hall = options?.hall ?? 'fact';
   const now = new Date().toISOString();
-  const nowDate = now.split('T')[0];
 
   const chunks = chunkText(content);
   const drawers: Drawer[] = chunks.map((c, i) => ({
@@ -72,14 +141,25 @@ export async function storeMemory(
     hall,
     type: 'memory',
     agent: 'yourca',
-    date: nowDate,
+    date: now.split('T')[0],
   }));
 
   await s.upsertDrawers(drawers);
+
+  // Also populate KG entities
+  try {
+    const kg = await getKG();
+    const entities = detectEntities(content);
+    for (const [name, count] of entities) {
+      kg.addEntity(name, count > 3 ? 'concept' : 'unknown', { mentions: count, source: 'yourca' });
+    }
+  } catch {}
+
   return drawers.map(d => d.id);
 }
 
-/** Search via MemPalace's LanceDB vector search. */
+// ─── Search ───
+
 export async function searchMemories(
   query: string,
   limit?: number,
@@ -90,17 +170,47 @@ export async function searchMemories(
   return results.map(r => ({ chunk: r, score: r.similarity }));
 }
 
-/** Search with keyword filter (delegates to MemPalace metadata filtering). */
 export async function searchByKeyword(query: string, limit?: number): Promise<SearchHit[]> {
   return searchMemories(query, limit);
 }
 
-/** Semantic-only search. */
 export async function searchBySemantic(query: string, limit?: number): Promise<SearchHit[]> {
   return searchMemories(query, limit);
 }
 
-/** Build RAG prompt context from search results. */
+// ─── Knowledge Graph ───
+
+export async function addEntity(name: string, type?: string, props?: Record<string, any>): Promise<string> {
+  const kg = await getKG();
+  return kg.addEntity(name, type, props);
+}
+
+export async function addTriple(triple: Triple): Promise<string> {
+  const kg = await getKG();
+  return kg.addTriple(triple);
+}
+
+export async function queryEntity(name: string): Promise<Triple[]> {
+  const kg = await getKG();
+  return kg.queryEntity(name);
+}
+
+export async function kgStats(): Promise<{ entities: any; triples: any; current: any; expired: number; types: any[] }> {
+  const kg = await getKG();
+  return kg.stats() as any;
+}
+
+// ─── Project Mining ───
+
+export async function mineProject(dir: string): Promise<{ files: number }> {
+  const s = await getStorage();
+  const files = scanProject(dir);
+  await mineDirectory(dir, s, cfg() as any, 'yourca');
+  return { files: files.length };
+}
+
+// ─── RAG ───
+
 export async function buildRagContext(
   query: string,
   maxResults?: number,
@@ -123,29 +233,34 @@ export async function buildRagContext(
     parts.push(text);
     tok += t;
   }
+
   return parts.join('\n');
 }
 
-/** Convenience: wrap base prompt with RAG context. */
 export async function enhanceSystemPrompt(base: string, query: string): Promise<string> {
-  const ctx = await buildRagContext(query);
-  return ctx ? `${base}\n\n${ctx}` : base;
+  // L0+L1 wake-up
+  let l0l1 = '';
+  try { l0l1 = await wakeUp(); } catch {}
+
+  // L3 deep search
+  let rag = await buildRagContext(query);
+
+  const extras = [];
+  if (l0l1) extras.push(l0l1);
+  if (rag) extras.push(rag);
+  return extras.length ? `${base}\n\n${extras.join('\n\n')}` : base;
 }
 
-/** Get rough storage stats. */
-export function getMemoryStats(): { count: number; embedded: number } {
-  const p = path.join(dbDir(), 'mempalace.lance');
+// ─── Stats & Admin ───
+
+export function getMemoryStats(): { vectorSizeKB: number } {
   try {
-    const s = fs.statSync(p);
-    return { count: Math.ceil(s.size / 1024), embedded: s.size > 0 ? 1 : 0 };
-  } catch {
-    return { count: 0, embedded: 0 };
-  }
+    const s = fs.statSync(DB_PATH);
+    return { vectorSizeKB: Math.ceil(s.size / 1024) };
+  } catch { return { vectorSizeKB: 0 }; }
 }
 
-/** Wipe local MemPalace data. */
 export function clearMemories(): void {
-  _storage = null;
-  const dir = dbDir();
-  try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
+  _storage = null; _stack = null; _kg = null; _config = null; _ready = false;
+  try { fs.rmSync(BASE, { recursive: true, force: true }); } catch {}
 }
