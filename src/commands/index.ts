@@ -108,21 +108,54 @@ const statusCommand: Command = {
 const compactCommand: Command = {
   type: 'action',
   name: 'compact',
-  description: 'Compact the conversation to save context',
-  async action(_args, context) {
+  description: 'Compact the conversation to save context (layered: micro → memory → LLM)',
+  async action(args, context) {
     const msgs = context.getMessages();
     if (msgs.length <= 2) {
       console.log('\nConversation is already short — nothing to compact.');
       return;
     }
-    // Create summary
-    const summary = `[Conversation compacted. ${msgs.length} messages were summarized to save context space. The original conversation content is summarized above. Please continue with the task.]`;
-    const lastMsg = msgs[msgs.length - 1];
-    context.setMessages([
-      { role: 'user', content: [{ type: 'text', text: summary }] },
-      lastMsg,
-    ]);
-    console.log(`\nCompacted ${msgs.length - 1} messages into summary.`);
+
+    const customInstructions = args.trim() || undefined;
+
+    // First: save pre-compact context to vector memory
+    const { savePreCompactContext } = await import('../memory/index.js');
+    const textMessages = msgs.map(m => ({
+      role: m.role,
+      content: m.content.filter(c => c.type === 'text').map(c => c.text).join('\n'),
+    }));
+    savePreCompactContext(textMessages);
+    console.log('   ✓ Pre-compact context saved to vector memory');
+
+    // Try session memory compact first (L2, zero API)
+    const { getSessionMemoryContent, isSessionMemoryEmpty, buildSessionMemorySummaryMessage } =
+      await import('../services/compact/index.js');
+
+    const sessionMemory = getSessionMemoryContent();
+    let compactMsgs: Message[] = [];
+
+    if (!isSessionMemoryEmpty()) {
+      const summaryText = buildSessionMemorySummaryMessage(sessionMemory, Math.min(5, Math.floor(msgs.length * 0.1)));
+      const summaryMsg: Message = { role: 'user', content: [{ type: 'text', text: summaryText }] };
+      compactMsgs = [
+        summaryMsg,
+        ...msgs.slice(-Math.min(5, Math.max(2, Math.floor(msgs.length * 0.1)))),
+      ];
+      console.log(`\n✓ Compacted via session memory (zero API cost)`);
+    } else {
+      // Fallback: keep last 5 messages, create compact summary
+      const keepCount = Math.min(5, msgs.length - 1);
+      const preserved: Message[] = msgs.slice(-keepCount);
+      const toCompact = msgs.slice(0, -keepCount);
+
+      const summary = `[Conversation compacted. ${toCompact.length} messages were summarized. The previous conversation covered the current task. Continue with the task. ${customInstructions ? `Focus: ${customInstructions}` : ''}]`;
+
+      const compactMsg: Message = { role: 'user', content: [{ type: 'text', text: summary }] };
+      compactMsgs = [compactMsg, ...preserved];
+      console.log(`\n✓ Compacted ${toCompact.length} messages, preserved ${keepCount}.`);
+    }
+
+    context.setMessages(compactMsgs);
   },
 };
 
@@ -137,6 +170,84 @@ const skillsCommand: Command = {
       console.log(`   /${cmd.name}  — ${cmd.description}`);
     }
     console.log('');
+  },
+};
+
+const memoryCommand: Command = {
+  type: 'action',
+  name: 'memory',
+  description: 'Show memory stats and search memories',
+  hidden: false,
+  async action(args) {
+    const { getMemoryStats, searchAllMemories } = await import('../memory/index.js');
+    const { getMemoryCount } = await import('../services/vectorMemory/index.js');
+
+    if (args.trim()) {
+      // Search
+      const results = searchAllMemories(args.trim(), 10);
+      console.log(`\n🔍 Search results for: "${args.trim()}"`);
+      console.log(`   Vector memory: ${results.vectorResults.length} results`);
+      for (const r of results.vectorResults) {
+        const age = Math.floor((Date.now() - r.entry.timestamp) / 86400000);
+        console.log(`   [${r.matchType}] ${Math.round(r.score * 100)}% match, ${age}d ago`);
+        console.log(`       ${r.entry.content.slice(0, 120)}...`);
+      }
+      console.log(`   File memory: ${results.memdirResults.length} results`);
+      for (const r of results.memdirResults) {
+        console.log(`   ${r}`);
+      }
+    } else {
+      // Stats
+      const stats = getMemoryStats();
+      console.log(`\n🧠 Memory System`);
+      console.log(`   File memories (MEMDIR): ${stats.memdirFileCount} files, ~${stats.totalEstimatedTokens} tokens`);
+      console.log(`   Vector entries:          ${getMemoryCount()}`);
+      console.log(`   Use /memory <query> to search`);
+    }
+  },
+};
+
+const goalCommand: Command = {
+  type: 'action',
+  name: 'goal',
+  description: 'Set a session goal for loop engineering',
+  hidden: false,
+  async action(args) {
+    const { setGoalMode, isGoalModeActive, getGoalState } = await import('../services/goalEngine.js');
+    if (!args.trim()) {
+      if (isGoalModeActive()) {
+        const state = getGoalState();
+        if (!state) {
+          console.log('\n🎯 No active goal.');
+          return;
+        }
+        console.log(`\n🎯 Active Goal:`);
+        console.log(`   ${state.goal}`);
+        console.log(`   Status: ${state.status}`);
+        console.log(`   Iterations: ${state.iteration}`);
+        console.log(`   Use /goal clear to finish`);
+      } else {
+        console.log('\n🎯 No active goal. Use /goal <your objective> to set one.');
+        console.log('   The goal system helps you iterate toward a target.');
+        console.log('   Examples:');
+        console.log('     /goal Refactor auth module to use JWT');
+        console.log('     /goal Fix all TypeScript errors in src/');
+        console.log('     /goal clear  — finish current goal');
+      }
+      return;
+    }
+
+    if (args.trim() === 'clear') {
+      const { clearGoal } = await import('../services/goalEngine.js');
+      clearGoal();
+      console.log('\n🎯 Goal cleared.');
+      return;
+    }
+
+    setGoalMode(args.trim());
+    console.log(`\n🎯 Goal set: ${args.trim()}`);
+    console.log(`   Starting loop engineering. Use /status to check progress.`);
+    console.log(`   Use /goal clear to finish.`);
   },
 };
 
@@ -165,6 +276,8 @@ const builtinCommands: Command[] = [
   compactCommand,
   skillsCommand,
   versionCommand,
+  memoryCommand,
+  goalCommand,
 ];
 
 export function getAllCommands(): Command[] {

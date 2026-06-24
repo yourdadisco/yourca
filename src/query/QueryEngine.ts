@@ -15,7 +15,8 @@ import { checkToolPermission } from '../tool/permissions.js';
 import { toolToApiDefinition } from '../tool/tools.js';
 import { streamChatCompletion } from './api.js';
 import { addToTotalCostState, addToTotalDurationState, addTokenUsage, incrementTurnCount, getMainLoopModel } from '../state/bootstrap.js';
-import { estimateMessagesTokens, shouldCompact, compactMessages } from '../services/compact.js';
+import { estimateMessagesTokens } from '../services/compact.js';
+import { microcompactMessages, autoCompactIfNeeded, shouldAutoCompact, buildPostCompactMessages, getAutoCompactState, resetAutoCompactState } from '../services/compact/index.js';
 import { classifyError, logError } from '../services/errors.js';
 import { createUserMessage } from './messages.js';
 
@@ -121,12 +122,35 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
       return mutableMessages;
     }
 
-    // Auto-compact when approaching token limit
-    if (shouldCompact(mutableMessages, model)) {
-      onEvent({ type: 'compact' });
-      const compacted = compactMessages(mutableMessages, model);
+    // L1: micro-compact every turn (zero LLM)
+    const mcResult = microcompactMessages(mutableMessages);
+    if (mcResult.toolResultsCleared > 0) {
       mutableMessages.length = 0;
-      mutableMessages.push(...compacted);
+      mutableMessages.push(...mcResult.messages);
+    }
+
+    // L2-L4: auto-compact when approaching token limit
+    if (shouldAutoCompact(mutableMessages, model)) {
+      onEvent({ type: 'compact' });
+      const result = await autoCompactIfNeeded(mutableMessages, model, {
+        systemPrompt,
+        tools: tools.map(t => ({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema,
+        })),
+        abortSignal: abortController.signal,
+        querySource: 'repl_main_thread',
+      });
+
+      if (result.wasCompacted && result.compactionResult) {
+        const built = buildPostCompactMessages(result.compactionResult);
+        mutableMessages.length = 0;
+        mutableMessages.push(...built);
+      } else if (result.consecutiveFailures && result.consecutiveFailures > 2) {
+        // Circuit breaker tripped — log but continue
+        onEvent({ type: 'error', message: 'Auto-compact failed after multiple attempts.' });
+      }
     }
 
     const toolUseContext: ToolUseContext = {

@@ -1,18 +1,42 @@
 /**
- * Memory system — ported from Claude Code's memdir system.
- * Provides:
- * - Memory directory path resolution
- * - Memory types taxonomy (user/feedback/project/reference)
- * - MEMORY.md index management
- * - Memory saving and retrieval prompts
+ * Dual-track Memory System — MEMDIR + Vector Memory.
+ *
+ * MEMDIR (Claude Code native):
+ *   - Markdown files, human-readable, MEMORY.md index
+ *   - Used for: short/medium-term (~25KB prompt budget)
+ *   - Always in context (MEMORY.md loaded at session start)
+ *   - Model writes/reads via tools (Write, Read, Edit)
+ *
+ * Vector Memory (MemPalace-inspired):
+ *   - JSON-file based, keyword search (FTS5-style)
+ *   - Used for: long-term, complete history
+ *   - Only loaded on demand (search triggered by relevance)
+ *   - Automatically populated from conversation and MEMDIR
+ *
+ * INTEGRATION:
+ *   - MEMDIR content is also indexed in Vector Memory
+ *   - Vector Memory enables fuzzy search across all memories
+ *   - Before compact: auto-save current context to vector store
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { getProjectRoot } from '../state/bootstrap.js';
+import {
+  storeMemory,
+  searchMemories,
+  getMemoryCount,
+  getAllMemories,
+  trimMemories,
+  buildMemoryContext,
+  normalizeMemoryContent,
+  storeConversationMemory,
+  type MemoryEntry,
+  type SearchResult,
+} from '../services/vectorMemory/index.js';
 
-// ─── Memory Types ───
+// ─── MEMDIR Types (Claude Code native) ───
 
 export type MemoryType = 'user' | 'feedback' | 'project' | 'reference';
 
@@ -23,7 +47,7 @@ export function parseMemoryType(raw: string): MemoryType | undefined {
   return MEMORY_TYPES.includes(normalized) ? normalized : undefined;
 }
 
-// ─── Memory Paths ───
+// ─── MEMDIR Paths ───
 
 export const ENTRYPOINT_NAME = 'MEMORY.md';
 export const MAX_ENTRYPOINT_LINES = 200;
@@ -41,8 +65,7 @@ export function getMemoryBaseDir(): string {
 export function getAutoMemPath(): string {
   const projectRoot = getProjectRoot();
   const projectSlug = projectRoot.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-  const memPath = path.join(getMemoryBaseDir(), 'projects', projectSlug, 'memory');
-  return memPath;
+  return path.join(getMemoryBaseDir(), 'projects', projectSlug, 'memory');
 }
 
 export function getAutoMemEntrypoint(): string {
@@ -116,7 +139,6 @@ export function appendMemoryIndex(line: string): boolean {
   try {
     const dir = path.dirname(entrypoint);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
     fs.appendFileSync(entrypoint, line + '\n', 'utf-8');
     return true;
   } catch {
@@ -124,77 +146,252 @@ export function appendMemoryIndex(line: string): boolean {
   }
 }
 
-// ─── Memory Prompt Sections ───
+// ─── MEMDIR + Vector Memory Integration ───
 
-export const MEMORY_FRONTMATTER_EXAMPLE = `---
-name: <short-kebab-case-slug>
-description: <one-line summary>
+/**
+ * Save a memory to BOTH MEMDIR (if readable) and Vector Memory (always).
+ * MEMDIR: writes a markdown file + appends to MEMORY.md index
+ * Vector: indexes content for search
+ */
+export function saveMemory(options: {
+  name: string;
+  description: string;
+  content: string;
+  type: MemoryType;
+  tags?: string[];
+}): { memdirPath?: string; vectorId?: string } {
+  const result: { memdirPath?: string; vectorId?: string } = {};
+
+  // 1. Save to Vector Memory (always)
+  storeConversationMemory(options.content, {
+    source: 'memdir',
+    type: options.type === 'user' ? 'preference' :
+          options.type === 'feedback' ? 'decision' :
+          options.type === 'reference' ? 'reference' : 'fact',
+    tags: ['memdir', ...(options.tags ?? []), options.type],
+  });
+
+  // 2. Save to MEMDIR (markdown file + index)
+  try {
+    const memPath = getAutoMemPath();
+    ensureMemoryDirExists(memPath);
+
+    const frontmatter = `---
+name: ${options.name}
+description: ${options.description}
 metadata:
-  type: user | feedback | project | reference
----`;
+  type: ${options.type}
+---
 
-export const WHAT_NOT_TO_SAVE_SECTION = `## What NOT to save
-- Code patterns or implementations (these are in the project itself)
-- Git history (derivable from the repo)
-- Debugging solutions you just implemented (already in the code)
-- CLAUDE.md content (already in context)
-- Ephemeral task details (only useful for the current conversation)`;
+`;
 
-export const WHEN_TO_ACCESS_SECTION = `## When to access memory
-- When the user asks about past conversations or decisions
-- When you need context about the user's preferences or workflow
-- When starting a new session and need to re-establish context
-- When the user asks "what were we working on?"`;
+    const filePath = path.join(memPath, `${options.name}.md`);
+    fs.writeFileSync(filePath, frontmatter + options.content, 'utf-8');
+    result.memdirPath = filePath;
 
-export const MEMORY_DRIFT_CAVEAT = 'Memory records can become stale over time. Always verify critical information against the current state of the project.';
+    // Append to MEMORY.md index
+    const indexLine = `- [${options.name}](${options.name}.md) — ${options.description}`;
+    appendMemoryIndex(indexLine);
+  } catch {
+    // MEMDIR is best-effort; vector memory is the canonical store
+  }
 
-// ─── Memory Prompt Builder ───
+  return result;
+}
 
-export function buildMemoryPrompt(displayName?: string): string {
+/**
+ * Delete a memory from both stores.
+ */
+export function deleteMemory(name: string): boolean {
+  let removed = false;
+
+  // Remove from MEMDIR
+  try {
+    const filePath = path.join(getAutoMemPath(), `${name}.md`);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      removed = true;
+    }
+    // Also remove from MEMORY.md (simple: rewrite without the line)
+    const entrypoint = getAutoMemEntrypoint();
+    if (fs.existsSync(entrypoint)) {
+      const content = fs.readFileSync(entrypoint, 'utf-8');
+      const lines = content.split('\n').filter(line => !line.includes(`](${name}.md)`));
+      fs.writeFileSync(entrypoint, lines.join('\n'), 'utf-8');
+    }
+  } catch {
+    // Best-effort
+  }
+
+  return removed;
+}
+
+/**
+ * Search across BOTH memory systems.
+ * First tries vector search (keyword), then falls back to MEMDIR grep.
+ */
+export function searchAllMemories(
+  query: string,
+  limit: number = 10,
+): { vectorResults: SearchResult[]; memdirResults: string[] } {
+  // Vector memory search
+  const vectorResults = searchMemories(query, limit);
+
+  // MEMDIR grep fallback
+  const memdirResults: string[] = [];
+  try {
+    const memPath = getAutoMemPath();
+    if (fs.existsSync(memPath)) {
+      const files = fs.readdirSync(memPath).filter(f => f.endsWith('.md'));
+      const terms = query.toLowerCase().split(/\s+/);
+      for (const file of files) {
+        const content = fs.readFileSync(path.join(memPath, file), 'utf-8');
+        if (terms.some(t => content.toLowerCase().includes(t))) {
+          const name = file.replace(/\.md$/, '');
+          // Extract description from frontmatter
+          const descMatch = content.match(/description:\s*(.+)/);
+          memdirResults.push(`- [${name}](${file})${descMatch ? ` — ${descMatch[1]}` : ''}`);
+        }
+      }
+    }
+  } catch {
+    // Best-effort
+  }
+
+  return { vectorResults, memdirResults };
+}
+
+/**
+ * Build the unified memory prompt for system prompt injection.
+ * Combines MEMDIR index (always loaded) + vector memory context (on-demand).
+ */
+export function buildMemoryPrompt(
+  displayName?: string,
+  query?: string,
+): string {
   ensureMemoryDirExists();
   const memPath = getAutoMemPath();
   const name = displayName ?? 'YourCA';
 
   const parts: string[] = [
-    `## Memory System`,
+    `## Memory System (Dual-Track)`,
     ``,
-    `${name} has a persistent file-based memory at \`${memPath}\`.`,
-    `Each memory is one file holding one fact, with YAML frontmatter:`,
+    `${name} has two memory systems working together:`,
     ``,
-    MEMORY_FRONTMATTER_EXAMPLE,
+    `**1. File Memory (MEMDIR)** — \`${memPath}\``,
+    `   Human-readable markdown files, always partially loaded.`,
+    `   Each file has YAML frontmatter with type: user | feedback | project | reference.`,
+    `   Use Write/Read/Edit tools to manage these files directly.`,
     ``,
-    `Memory types:`,
-    `- **user** — Who the user is (role, expertise, preferences)`,
-    `- **feedback** — Guidance on how to work (corrections, confirmed approaches)`,
-    `- **project** — Ongoing work, goals, constraints not in code or git`,
-    `- **reference** — External resources (URLs, documentation)`,
+    `**2. Searchable Memory (Vector Store)** — Semantic keyword search across all memories.`,
+    `   Automatically indexed from conversations and file memories.`,
+    `   Access via: query the system for relevant memories when starting new tasks.`,
     ``,
-    `Rules:`,
-    `- Use \`Write\` to create new memory files`,
-    `- Use \`Edit\` to update existing memory (the file path IS the canonical link)`,
-    `- Use \`Read\` to load a memory's content`,
-    `- The \`MEMORY.md\` file in the memory directory is the INDEX — append a one-line pointer when you write a new memory`,
-    `- Memories are organized by topic, not chronologically`,
-    `- Link related memories with [[name]] in the body`,
+    `Rules for saving to MEMDIR:`,
+    `- Use \`Write\` to create memory files with YAML frontmatter`,
+    `- Append one-line pointer to MEMORY.md when creating`,
+    `- Use \`Edit\` to update existing memories`,
+    `- Link with [[name]] cross-references`,
     ``,
-    WHAT_NOT_TO_SAVE_SECTION,
+    `### What NOT to save`,
+    `- Code patterns or implementations already in the project`,
+    `- Git history (derivable from the repo)`,
+    `- CLAUDE.md content (already in context)`,
+    `- Ephemeral task details`,
     ``,
-    WHEN_TO_ACCESS_SECTION,
+    `### When to access memory`,
+    `- When the user asks about past conversations or decisions`,
+    `- When you need context about preferences or workflow`,
+    `- When starting a new session`,
     ``,
-    MEMORY_DRIFT_CAVEAT,
+    `Memory can become stale — verify critical information against current state.`,
   ];
 
   // Try to include existing MEMORY.md content
   const existing = readMemoryIndex();
   if (existing) {
-    parts.push('', '## Existing memories', existing.content);
+    parts.push('', '## Existing File Memories', existing.content);
+  }
+
+  // Add vector memory context if query provided
+  if (query) {
+    const vecContext = buildMemoryContext(query, 5);
+    if (vecContext) {
+      parts.push('', vecContext);
+    }
   }
 
   return parts.join('\n');
 }
 
+/**
+ * Pre-compact hook: save important context to vector memory before compaction.
+ * This ensures information survives compact.
+ */
+export function savePreCompactContext(messages: Array<{ role: string; content: string }>): void {
+  // Extract user messages and assistant summaries
+  const userMessages: string[] = [];
+  const assistantSummaries: string[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === 'user' && msg.content) {
+      userMessages.push(msg.content);
+    } else if (msg.role === 'assistant' && msg.content) {
+      assistantSummaries.push(msg.content);
+    }
+  }
+
+  // Save condensed version to vector memory
+  const recentUserContent = userMessages.slice(-3).join('\n---\n');
+  const recentAssistantContent = assistantSummaries.slice(-3).join('\n---\n');
+
+  if (recentUserContent) {
+    storeConversationMemory(recentUserContent, {
+      type: 'fact',
+      tags: ['pre-compact', 'user-requests'],
+    });
+  }
+
+  if (recentAssistantContent) {
+    storeConversationMemory(recentAssistantContent, {
+      type: 'fact',
+      tags: ['pre-compact', 'assistant-response'],
+    });
+  }
+}
+
+/**
+ * Statistics about both memory systems.
+ */
+export function getMemoryStats(): {
+  memdirFileCount: number;
+  vectorEntryCount: number;
+  totalEstimatedTokens: number;
+} {
+  let memdirFileCount = 0;
+  let memdirTotalBytes = 0;
+
+  try {
+    const memPath = getAutoMemPath();
+    if (fs.existsSync(memPath)) {
+      const files = fs.readdirSync(memPath).filter(f => f.endsWith('.md'));
+      memdirFileCount = files.length;
+      for (const file of files) {
+        try {
+          memdirTotalBytes += fs.statSync(path.join(memPath, file)).size;
+        } catch { /* skip */ }
+      }
+    }
+  } catch { /* skip */ }
+
+  return {
+    memdirFileCount,
+    vectorEntryCount: getMemoryCount(),
+    totalEstimatedTokens: Math.ceil(memdirTotalBytes / 3.5) + getMemoryCount() * 100,
+  };
+}
+
 export function isAutoMemoryEnabled(): boolean {
-  // Check env var
   if (process.env.YOURCA_DISABLE_AUTO_MEMORY === '1') return false;
   return true;
 }
