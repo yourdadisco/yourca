@@ -1,0 +1,14 @@
+[
+  {
+    "taskId": "qa",
+    "taskName": "知识问答",
+    "mode": "normal",
+    "success": true,
+    "inputTokens": 105754,
+    "outputTokens": 3925,
+    "toolCalls": 36,
+    "durationMs": 42955,
+    "summary": "Let me explore the project structure first to understand the compact system.Now let me read all the compact-related source files:The path has a drive letter issue. Let me use the correct path format.T",
+    "timestamp": "2026-06-24T14:18:31.706Z"
+  }
+]

@@ -54,20 +54,40 @@ export async function runSubagent(config: SubagentConfig): Promise<SubagentResul
         }
       }
 
-      const apiTools = availableTools.map(t => ({
-        type: 'function' as const,
-        function: { name: t.name, description: t.description, parameters: t.inputSchema },
+      // Pass raw Tool objects — streamChatCompletion handles formatting
+      const filteredTools = availableTools.map(t => ({
+        name: t.name,
+        description: t.description,
+        input_schema: t.inputSchema,
       }));
 
-      const apiMessages = messages.map(m => ({
-        role: m.role,
-        content: m.content.filter(c => c.type === 'text').map(c => c.text).join('\n') || null,
-      }));
+      const apiMessages: any[] = [];
+      for (const m of messages) {
+        const toolResults = m.content.filter(c => c.type === 'tool_result');
+        if (toolResults.length > 0) {
+          for (const tr of toolResults) {
+            const textContent = tr.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+            apiMessages.push({ role: 'tool', tool_call_id: tr.tool_use_id, content: textContent || null });
+          }
+        } else {
+          const text = m.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+          const toolCalls = m.content.filter(c => c.type === 'tool_use');
+          const entry: any = { role: m.role, content: text || null };
+          if (toolCalls.length > 0) {
+            entry.tool_calls = toolCalls.map(tc => ({
+              id: tc.id,
+              type: 'function',
+              function: { name: tc.name, arguments: JSON.stringify(tc.input) },
+            }));
+          }
+          apiMessages.push(entry);
+        }
+      }
 
       const startTime = Date.now();
       let result;
       try {
-        result = await streamChatCompletion(systemPrompt, apiMessages, apiTools, {
+        result = await streamChatCompletion(systemPrompt, apiMessages, filteredTools, {
           signal: abortController.signal,
           model: getMainLoopModel(),
         });

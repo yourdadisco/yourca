@@ -10,7 +10,8 @@ interface RunResult {
   taskName: string;
   mode: 'normal' | 'coordinator' | 'delm';
   success: boolean;
-  tokensUsed: { input: number; output: number };
+  inputTokens: number;
+  outputTokens: number;
   toolCalls: number;
   durationMs: number;
   summary: string;
@@ -20,11 +21,7 @@ interface RunResult {
 
 type AgentMode = 'normal' | 'coordinator' | 'delm';
 
-interface ModeConfig {
-  mode: AgentMode;
-  envVar: string;
-  envValue: string;
-}
+interface ModeConfig { mode: AgentMode; envVar: string; envValue: string }
 
 const MODES: ModeConfig[] = [
   { mode: 'normal', envVar: '', envValue: '' },
@@ -38,81 +35,41 @@ function ensureDir(): void {
   if (!fs.existsSync(RESULTS_DIR)) fs.mkdirSync(RESULTS_DIR, { recursive: true });
 }
 
-function setMode(modeConfig: ModeConfig): void {
+function setMode(mc: ModeConfig): void {
   delete process.env.YOURCA_COORDINATOR_MODE;
   delete process.env.YOURCA_DELM_MODE;
-  if (modeConfig.envVar) {
-    process.env[modeConfig.envVar] = modeConfig.envValue;
-  }
-  setArchitecture(modeConfig.mode);
+  if (mc.envVar) process.env[mc.envVar] = mc.envValue;
+  setArchitecture(mc.mode);
 }
 
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-function formatTokens(t: number): string {
-  return t.toLocaleString();
-}
+function fmtDur(ms: number): string { return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`; }
+function fmtTok(t: number): string { return t.toLocaleString(); }
 
 async function runTask(task: TestTask, mode: AgentMode): Promise<RunResult> {
   const { getTools } = await import('../../src/tool/tools.js');
   const { runSubagent } = await import('../../src/services/subagent.js');
 
-  const permissionContext = {
-    mode: 'default' as const,
-    additionalWorkingDirectories: [] as string[],
-  };
-
+  const permissionContext = { mode: 'default' as const, additionalWorkingDirectories: [] as string[] };
   const tools = getTools(permissionContext);
   const abortController = new AbortController();
-
-  const toolUseContext = {
-    abortController,
-    getAppState: () => ({ tools }),
-    setAppState: () => {},
-    messages: [] as any[],
-    permissionContext,
-  };
-
+  const toolUseContext = { abortController, getAppState: () => ({ tools }), setAppState: () => {}, messages: [] as any[], permissionContext, options: {} };
   const startTime = Date.now();
 
   try {
-    const result = await runSubagent({
-      prompt: task.prompt,
-      agentType: 'general-purpose',
-      parentContext: toolUseContext as any,
-      tools,
-    });
-
-    const durationMs = Date.now() - startTime;
-
+    const result = await runSubagent({ prompt: task.prompt, agentType: 'general-purpose', parentContext: toolUseContext as any, tools });
     return {
-      taskId: task.id,
-      taskName: task.name,
-      mode,
+      taskId: task.id, taskName: task.name, mode,
       success: result.success,
-      tokensUsed: result.usage,
+      inputTokens: result.usage.input_tokens,
+      outputTokens: result.usage.output_tokens,
       toolCalls: result.toolCallCount,
-      durationMs,
+      durationMs: Date.now() - startTime,
       summary: result.text.slice(0, 200),
       error: result.error,
       timestamp: new Date().toISOString(),
     };
   } catch (err: any) {
-    return {
-      taskId: task.id,
-      taskName: task.name,
-      mode,
-      success: false,
-      tokensUsed: { input: 0, output: 0 },
-      toolCalls: 0,
-      durationMs: Date.now() - startTime,
-      summary: '',
-      error: err.message,
-      timestamp: new Date().toISOString(),
-    };
+    return { taskId: task.id, taskName: task.name, mode, success: false, inputTokens: 0, outputTokens: 0, toolCalls: 0, durationMs: Date.now() - startTime, summary: '', error: err.message, timestamp: new Date().toISOString() };
   }
 }
 
@@ -122,14 +79,9 @@ async function main(): Promise<void> {
   const taskFilter = args.includes('--task') ? args[args.indexOf('--task') + 1] : undefined;
 
   const apiKey = process.env.DEEPSEEK_API_KEY || process.env.YOURCA_API_KEY;
-  if (!apiKey) {
-    console.error('Error: DEEPSEEK_API_KEY not set');
-    process.exit(1);
-  }
+  if (!apiKey) { console.error('Error: DEEPSEEK_API_KEY not set'); process.exit(1); }
   initAPI({ apiKey });
-
   try { await initMempalace(); } catch {}
-
   ensureDir();
 
   const modes = modeFilter ? MODES.filter(m => m.mode === modeFilter) : MODES;
@@ -141,54 +93,35 @@ async function main(): Promise<void> {
 
   const allResults: RunResult[] = [];
 
-  for (const modeConfig of modes) {
-    console.log(`\n── Mode: ${modeConfig.mode.toUpperCase()} ──\n`);
-
+  for (const mc of modes) {
+    console.log(`\n── Mode: ${mc.mode.toUpperCase()} ──\n`);
     for (const task of tasks) {
       process.stdout.write(`  Running "${task.name}"... `);
-
-      setMode(modeConfig);
-
-      const result = await runTask(task, modeConfig.mode);
-      allResults.push(result);
-
-      const status = result.success ? '✅' : '❌';
-      console.log(`${status} ${formatTokens(result.tokensUsed.input + result.tokensUsed.output)} tok, ${formatDuration(result.durationMs)}, ${result.toolCalls} tools`);
-      if (!result.success) {
-        console.log(`    Error: ${result.error}`);
-      }
+      setMode(mc);
+      const r = await runTask(task, mc.mode);
+      allResults.push(r);
+      const t = r.inputTokens + r.outputTokens;
+      console.log(`${r.success ? '✅' : '❌'} ${fmtTok(t)} tok, ${fmtDur(r.durationMs)}, ${r.toolCalls} tools`);
+      if (!r.success) console.log(`    Error: ${r.error}`);
     }
   }
 
-  const timestamp = new Date().toISOString().split('T')[0];
-  const resultFile = path.join(RESULTS_DIR, `${timestamp}-all.json`);
-  fs.writeFileSync(resultFile, JSON.stringify(allResults, null, 2), 'utf-8');
-  console.log(`\nResults saved to: ${resultFile}`);
+  const ts = new Date().toISOString().split('T')[0];
+  const rf = path.join(RESULTS_DIR, `${ts}-all.json`);
+  fs.writeFileSync(rf, JSON.stringify(allResults, null, 2), 'utf-8');
+  console.log(`\nResults saved to: ${rf}`);
 
   console.log('\n── Comparison ──\n');
-  const header = `Task${' '.repeat(12)} | normal tok${' '.repeat(6)} | coord tok${' '.repeat(6)} | delm tok${' '.repeat(6)} | normal time | coord time | delm time`;
-  console.log(header);
-  console.log('-'.repeat(header.length));
-
+  const h = `Task${' '.repeat(12)} | tok${' '.repeat(8)} | time${' '.repeat(7)} | tools`;
+  console.log(h);
+  console.log('-'.repeat(h.length));
   for (const task of tasks) {
-    const tResults = allResults.filter(r => r.taskId === task.id);
-    const getVal = (mode: string, field: string): string => {
-      const r = tResults.find(r => r.mode === mode);
-      if (!r) return '─'.repeat(8);
-      if (field === 'durationMs') return formatDuration(r.durationMs).padStart(8);
-      if (field === 'tokens') return formatTokens(r.tokensUsed.input + r.tokensUsed.output).padStart(10);
-      return '─'.repeat(8);
-    };
-
-    console.log(
-      `${task.name.padEnd(16)} | ${getVal('normal', 'tokens')} | ${getVal('coordinator', 'tokens')} | ${getVal('delm', 'tokens')} | ${getVal('normal', 'durationMs')} | ${getVal('coordinator', 'durationMs')} | ${getVal('delm', 'durationMs')}`
-    );
+    const tr = allResults.filter(r => r.taskId === task.id);
+    for (const r of tr) {
+      console.log(`  ${task.name.padEnd(14)} ${r.mode.padEnd(10)} ${fmtTok(r.inputTokens + r.outputTokens).padStart(8)} tok, ${fmtDur(r.durationMs).padStart(8)}, ${r.toolCalls} tools`);
+    }
+    console.log('');
   }
-
-  console.log('');
 }
 
-main().catch(err => {
-  console.error('Fatal:', err);
-  process.exit(1);
-});
+main().catch(err => { console.error('Fatal:', err); process.exit(1); });
