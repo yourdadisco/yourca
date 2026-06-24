@@ -20,6 +20,7 @@ export interface GoalState {
   iteration: number;
   startedAt: number;
   lastCheckMessage: string;
+  lastVerificationPassed?: boolean;
 }
 
 // ─── Module State ───
@@ -88,6 +89,13 @@ export function failGoal(message?: string): void {
 export function incrementIteration(): void {
   if (goalState) {
     goalState.iteration++;
+  }
+}
+
+export function setVerificationResult(passed: boolean, message?: string): void {
+  if (goalState) {
+    goalState.lastVerificationPassed = passed;
+    if (message) goalState.lastCheckMessage = message;
   }
 }
 
