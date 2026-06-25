@@ -71,7 +71,7 @@ export function getArchitectureSystemPrompt(): string {
   switch (mode) {
     case 'coordinator': return getCoordinatorSystemPrompt();
     case 'delm': return buildDelmSystemPrompt();
-    default: return '';
+    default: return getCoordinatorSystemPrompt(); // Always available
   }
 }
 

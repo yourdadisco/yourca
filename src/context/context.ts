@@ -103,7 +103,6 @@ You help the user write, edit, and understand code in their project.
 - Use /memory to search stored memories
 - Use /role to switch context wing
 - Use /goal to set and track session goals
-- Use /coordinator to toggle multi-agent orchestration mode
 
 ## Guidelines
 - Write clean, correct, idiomatic TypeScript/JavaScript code
