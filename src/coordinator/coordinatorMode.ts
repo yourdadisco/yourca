@@ -11,7 +11,7 @@ function isEnvTruthy(val: string | undefined): boolean {
 let _active = false;
 
 export function isCoordinatorMode(): boolean {
-  return _active || isEnvTruthy(process.env.YOURCA_COORDINATOR_MODE);
+  return _active || process.env.YOURCA_COORDINATOR_MODE === "1";
 }
 
 export function setCoordinatorMode(active: boolean): void {

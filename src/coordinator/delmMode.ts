@@ -197,7 +197,7 @@ let delmActive = false;
 // ─── Public API ───
 
 export function isDelmMode(): boolean {
-  return delmActive;
+  return delmActive || process.env.YOURCA_DELM_MODE === "1";
 }
 
 export function setDelmMode(active: boolean): void {
