@@ -8,6 +8,8 @@ import { toolToApiDefinition } from '../tool/tools.js';
 import { streamChatCompletion } from './api.js';
 import { addToTotalCostState, addToTotalDurationState, addTokenUsage, incrementTurnCount } from '../state/bootstrap.js';
 import { estimateMessagesTokens } from './messages.js';
+import { isGoalModeActive, getGoalState, completeGoal, incrementIteration } from '../services/goalEngine.js';
+import { runSubagent } from '../services/subagent.js';
 
 const DEEPSEEK_PRICING = { input: 0.00027, output: 0.0011 };
 
@@ -175,6 +177,61 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
     );
 
     if (toolCalls.length === 0) {
+      // Auto goal verification: if goal active and model stopped making tool calls
+      if (isGoalModeActive()) {
+        const lastAsst = mutableMessages.filter(m => m.role === 'assistant').pop();
+        const lastAsstText = lastAsst?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
+        const goalState = getGoalState();
+
+        if (goalState && lastAsstText) {
+          const verifyPrompt = [
+            '# Verification Task',
+            '',
+            'Verify whether the following goal has been COMPLETELY achieved.',
+            '',
+            'Goal: ' + goalState.goal,
+            '',
+            'What was done this iteration:',
+            lastAsstText.slice(0, 2000),
+            '',
+            'Respond with exactly one of:',
+            'PASS: <reason why goal is met>',
+            'FAIL: <what is missing or wrong>',
+          ].join('\n');
+
+          try {
+            const verifyResult = await runSubagent({
+              prompt: verifyPrompt,
+              agentType: 'verify',
+              parentContext: toolUseContext,
+              tools,
+            });
+
+            const verifyText = verifyResult.text;
+            if (verifyText.startsWith('PASS')) {
+              completeGoal('Goal verified: ' + verifyText.replace('PASS:', '').trim());
+              mutableMessages.push({
+                role: 'user',
+                content: [{ type: 'text', text: '[Goal verification: PASSED - ' + verifyText.replace('PASS:', '').trim() + ']' }],
+              });
+              onEvent({ type: 'done', reason: 'goal_completed' });
+              return mutableMessages;
+            } else {
+              incrementIteration();
+              const feedback = verifyText.replace('FAIL:', '').trim();
+              mutableMessages.push({
+                role: 'user',
+                content: [{ type: 'text', text: '[Goal verification: FAILED - ' + feedback + ']' + ' Please fix the issues and try again.' }],
+              });
+              // Continue the loop for another iteration
+              continue;
+            }
+          } catch {
+            // If verification agent fails, fall through to normal completion
+          }
+        }
+      }
+
       onEvent({ type: 'done', reason: 'completed' });
       return mutableMessages;
     }
@@ -230,6 +287,34 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
         { role: 'user', content: [{ type: 'text', text: `[Context compacted. Continuing...]` }] },
         ...lastMsgs,
       );
+    }
+  }
+
+  // Goal verification at max turns with visible progress
+  if (isGoalModeActive()) {
+    const { completeGoal, incrementIteration, getGoalState } = await import('../services/goalEngine.js');
+    const { runSubagent } = await import('../services/subagent.js');
+    const lastAsst = mutableMessages.filter(m => m.role === 'assistant').pop();
+    const lastAsstText = lastAsst?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
+    const goalState = getGoalState();
+    if (goalState && lastAsstText) {
+      try { onEvent({ type: 'text', text: '\n[Goal 🔍 Verifying...]\n' }); } catch {}
+      // Inject verification status into the conversation so the model sees it
+      const verifyPrompt = `# Verification Task\n\nVerify whether the goal has been COMPLETELY achieved.\n\nGoal: ${goalState.goal}\n\nWhat was done:\n${lastAsstText.slice(0, 2000)}\n\nRespond with exactly:\nPASS: <reason>\nFAIL: <what is missing>`;
+      try {
+        const verifyCtx = { abortController, getAppState: () => ({ tools }), setAppState: () => {}, messages: [], permissionContext, options: {} };
+        const verifyResult = await runSubagent({ prompt: verifyPrompt, agentType: 'verify', parentContext: verifyCtx as any, tools });
+        if (verifyResult.text.startsWith('PASS')) {
+          completeGoal('Goal verified: ' + verifyResult.text.replace('PASS:', '').trim());
+          onEvent({ type: 'text', text: '\n[Goal ✅ VERIFIED: ' + verifyResult.text.replace('PASS:', '').trim() + ']\n' });
+          onEvent({ type: 'done', reason: 'goal_completed' });
+          return mutableMessages;
+        } else {
+          incrementIteration();
+          onEvent({ type: 'text', text: '\n[Goal ❌ NOT YET: ' + verifyResult.text.replace('FAIL:', '').trim() + ']\n' });
+          onEvent({ type: 'text', text: '[↻ Iteration ' + goalState.iteration + ' continuing...]\n' });
+        }
+      } catch {}
     }
   }
 
