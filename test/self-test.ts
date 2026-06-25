@@ -22,7 +22,7 @@ function printResult(name: string, status: TestStatus, detail?: string): void {
   results.push({ name, status, detail });
   completed++;
 
-  if (completed >= TOTAL_TESTS) {
+  if (completed === TOTAL_TESTS) {
     const passed = results.filter(r => r.status === 'passed').length;
     const failed = results.filter(r => r.status === 'failed').length;
     console.log('\n  \x1b[1mResults: \x1b[32m' + passed + ' passed\x1b[0m, \x1b[31m' + failed + ' failed\x1b[0m\n');
@@ -150,21 +150,21 @@ function test(name: string, fn: () => void | Promise<void>): void {
   });
 
   // 6. Context
-  test('context: basic system prompt structure', async () => {
-    const p = await buildSystemPrompt({ gitStatus: '', currentBranch: 'main', recentCommits: '' }, { currentDate: '2025-01-01' });
+  test('context: basic system prompt structure', () => {
+    const p = buildSystemPrompt({ gitStatus: '', currentBranch: 'main', recentCommits: '' }, { currentDate: '2025-01-01' });
     if (!p.includes('YourCA')) throw new Error('no YourCA');
     if (!p.includes('2025-01-01')) throw new Error('no date');
     if (!p.includes('Bash') || !p.includes('Read')) throw new Error('missing tool refs');
   });
 
-  test('context: includes CLAUDE.md content', async () => {
-    const p = await buildSystemPrompt({ gitStatus: '', currentBranch: 'main', recentCommits: '' }, { currentDate: '2025-01-01', claudeMd: '# Custom\nAlways TS.' });
+  test('context: includes CLAUDE.md content', () => {
+    const p = buildSystemPrompt({ gitStatus: '', currentBranch: 'main', recentCommits: '' }, { currentDate: '2025-01-01', claudeMd: '# Custom\nAlways TS.' });
     if (!p.includes('Custom')) throw new Error('missing CLAUDE.md');
     if (!p.includes('Project instructions')) throw new Error('missing section header');
   });
 
-  test('context: includes git branch and state', async () => {
-    const p = await buildSystemPrompt({ gitStatus: 'M f.ts', currentBranch: 'feat-x', recentCommits: 'abc123 msg' }, { currentDate: '2025-01-01' });
+  test('context: includes git branch and state', () => {
+    const p = buildSystemPrompt({ gitStatus: 'M f.ts', currentBranch: 'feat-x', recentCommits: 'abc123 msg' }, { currentDate: '2025-01-01' });
     if (!p.includes('feat-x')) throw new Error('missing branch');
     if (!p.includes('Git state')) throw new Error('missing git section');
     if (!p.includes('M f.ts')) throw new Error('missing git status');

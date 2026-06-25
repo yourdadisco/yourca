@@ -1,12 +1,7 @@
 /**
  * DeepSeek API client — OpenAI-compatible streaming API
- * Enterprise version with:
- * - Proper error handling
- * - Retry logic for transient failures
- * - Usage tracking
- * - Support for multiple models
+ * Base URL: https://api.deepseek.com
  */
-
 import { getMainLoopModel } from '../state/bootstrap.js';
 
 const DEEPSEEK_BASE_URL = 'https://api.deepseek.com';
@@ -23,7 +18,7 @@ export function initAPI(config: APIConfig): void {
 }
 
 export function getApiKey(): string {
-  if (!apiKey) throw new Error('API not initialized. Set DEEPSEEK_API_KEY in config.');
+  if (!apiKey) throw new Error('API not initialized. Set DEEPSEEK_API_KEY.');
   return apiKey;
 }
 
@@ -108,15 +103,6 @@ export async function streamChatCompletion(
 
   if (!response.ok) {
     const text = await response.text();
-    if (response.status === 429) {
-      throw new Error(`Rate limit exceeded (429). Please wait and try again.`);
-    }
-    if (response.status === 401) {
-      throw new Error(`Authentication failed (401). Please check your API key.`);
-    }
-    if (response.status >= 500) {
-      throw new Error(`DeepSeek API server error (${response.status}). Please try again later.`);
-    }
     throw new Error(`DeepSeek API error (${response.status}): ${text}`);
   }
 
