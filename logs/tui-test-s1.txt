@@ -1,0 +1,11 @@
+TUI Test Session 1: MemPalace integration verification
+Date: 2026-06-25
+
+Test steps:
+1. /role → shows "Current wing: yourca" ✅
+2. /goal → shows "No active goal" ✅
+3. /memory → shows MemPalace stats ✅
+4. /memory TypeScript → searches memories ✅
+
+Conclusion: All commands recognized. MemPalace initialized at startup.
+/memory shows wing/drawers/rooms stats. /memory <query> searches.

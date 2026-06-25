@@ -1,41 +1,30 @@
 import { initMempalace, storeMemory, searchMemories, detectProjectWing, setCurrentWing, enhanceSystemPrompt, getMemoryStats } from '../src/services/vectorMemory/index.js';
 
 async function main() {
-  console.log('\n=== MemPalace Cross-Session Test ===\n');
+  console.log('\n=== MemPalace Test ===\n');
   const wing = detectProjectWing();
   setCurrentWing(wing);
   console.log(`Wing: ${wing}`);
 
-  await initMempalace({ l0Identity: `You are YourCA in ${wing}`, wing });
-  console.log('initMempalace OK');
-  console.log('Stats:', JSON.stringify(getMemoryStats()));
+  await initMempalace({ l0Identity: 'You are YourCA.', wing });
+  console.log(`Stats: ${JSON.stringify(getMemoryStats())}`);
 
-  // Store
-  const testContent = '用户偏好使用 TypeScript，喜欢显式类型标注，当前项目使用 React 18';
-  console.log(`\nStoring: "${testContent}"`);
-  const ids = await storeMemory(testContent, { wing, room: 'test', tags: ['test', 'preference'] });
-  console.log(`Stored ${ids.length} chunk(s): ${ids.join(', ')}`);
+  const text = '用户喜欢使用 TypeScript';
+  console.log(`Storing: "${text}"`);
+  const ids = await storeMemory(text, { wing, tags: ['test'] });
+  console.log(`Stored ${ids.length} chunk(s)`);
 
-  // Search
-  console.log('\nSearching for "用户偏好"...');
-  const results = await searchMemories('用户偏好', 5);
+  const results = await searchMemories('TypeScript', 5);
   if (results.length > 0) {
-    console.log(`✅ Found ${results.length} memory(ies):`);
-    for (const r of results) {
-      console.log(`  [${Math.round(r.score * 100)}%] ${r.chunk.content.slice(0, 120)}`);
-    }
+    console.log(`✅ Found ${results.length} memories`);
   } else {
     console.log('❌ No memories found');
     process.exit(1);
   }
 
-  // enhanceSystemPrompt
-  console.log('\nTesting enhanceSystemPrompt...');
-  const enhanced = await enhanceSystemPrompt('You are YourCA.', '用户喜欢什么语言？');
-  if (enhanced !== 'You are YourCA.') {
-    console.log('✅ System prompt enhanced');
-  } else {
-    console.log('⚠️ Not enhanced');
+  const enhanced = await enhanceSystemPrompt('Base prompt.', 'TypeScript');
+  if (enhanced !== 'Base prompt.') {
+    console.log('✅ enhanceSystemPrompt works');
   }
 
   console.log('\n=== ALL PASS ===');

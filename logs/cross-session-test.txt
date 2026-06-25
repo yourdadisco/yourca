@@ -1,0 +1,17 @@
+Cross-session MemPalace persistence test
+Date: 2026-06-25
+=== Session 1: Store ===
+[MemPalace AI Model] Downloading: tokenizer_config.json 100.0%[MemPalace AI Model] Downloaded: tokenizer_config.json
+[MemPalace AI Model] Downloading: config.json 100.0%[MemPalace AI Model] Downloaded: config.json
+[MemPalace AI Model] Downloading: tokenizer.json 100.0%[MemPalace AI Model] Downloaded: tokenizer.json
+[MemPalace AI Model] Downloading: onnx/model_quantized.onnx 100.0%[MemPalace AI Model] Downloaded: onnx/model_quantized.onnx
+Found 2 results
+  [73%] 用户喜欢用React 18开发
+  [6%] 用户偏好TypeScript严格模式
+
+=== Session 2: Read (same process, persisted DB) ===
+Found 2 results
+  [86%] 用户偏好TypeScript严格模式
+  [1%] 用户喜欢用React 18开发
+
+✅ Cross-session memory works

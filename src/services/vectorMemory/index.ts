@@ -1,15 +1,11 @@
 /**
  * MemPalace integration — YourCA's vector memory backend.
- *
- * Fixes applied over @mempalace/core v0.1.1:
- * 1. CJK-safe chunkText (core's chunkText returns empty for Chinese)
- * 2. Pre-computed embeddings (core doesn't ship embedding_worker.js in npm)
- * 3. Empty-chunk guard (prevents LanceDB "Cannot scan empty Vec" error)
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { fileURLToPath } from 'url';
 
 import {
   VectorStorage,
@@ -24,33 +20,22 @@ import {
 export type { Drawer };
 export interface SearchHit { chunk: Drawer; score: number }
 
+// ─── Fix __dirname for @mempalace/core embedding worker in ESM ───
+if (typeof (globalThis as any).__dirname === 'undefined') {
+  try {
+    const ourDir = path.dirname(fileURLToPath(import.meta.url));
+    const pkgDir = path.resolve(ourDir, '..', '..', '..', 'node_modules', '@mempalace', 'core', 'dist');
+    if (fs.existsSync(pkgDir)) (globalThis as any).__dirname = pkgDir;
+  } catch {}
+}
+
 const BASE = path.join(os.homedir(), '.yourca', 'mempalace');
 const DB_PATH = path.join(BASE, 'mempalace.lance');
 const TABLE = 'mempalace_drawers';
 const KG_PATH = path.join(BASE, 'knowledge.db');
 const IDENTITY_PATH = path.join(BASE, 'identity.md');
-const DIM = 384;
 
-// ─── Local embedding (pre-computed so upsertDrawers skips missing worker) ───
-
-function localEmbed(text: string): number[] {
-  const vec = new Array(DIM).fill(0);
-  const tokens = text.toLowerCase().replace(/[^\w\s]/g, ' ').split(/\s+/).filter(Boolean);
-  for (const t of tokens) {
-    let h = 0;
-    for (let i = 0; i < t.length; i++) { h = ((h << 5) - h) + t.charCodeAt(i); h |= 0; }
-    const idx = Math.abs(h) % DIM;
-    vec[idx] += 1;
-    for (let j = 1; j <= 3; j++) vec[(idx + j) % DIM] += 0.5 / j;
-  }
-  let mag = 0;
-  for (let i = 0; i < DIM; i++) mag += vec[i] * vec[i];
-  mag = Math.sqrt(mag);
-  if (mag > 0) for (let i = 0; i < DIM; i++) vec[i] /= mag;
-  return vec;
-}
-
-// ─── CJK-safe chunkText (core returns empty for Chinese text) ───
+// ─── CJK-safe chunkText ───
 
 function safeChunkText(text: string): Array<{ content: string; chunkIndex: number }> {
   if (!text) return [];
@@ -138,7 +123,7 @@ export async function wakeUp(wing?: string): Promise<string> { return (await get
 export async function recall(wing?: string, room?: string, n?: number): Promise<string> { return (await getStack()).recall(wing, room, n); }
 export async function deepSearch(query: string, wing?: string, room?: string, n?: number): Promise<string> { return (await getStack()).search(query, wing, room, n); }
 
-// ─── Store (pre-computes vector to avoid missing embedding worker) ───
+// ─── Store ───
 
 export async function storeMemory(content: string, options?: { wing?: string; room?: string; tags?: string[] }): Promise<string[]> {
   const s = await getStorage();
@@ -154,10 +139,10 @@ export async function storeMemory(content: string, options?: { wing?: string; ro
     content: c.content, wing, room, hall,
     sourceFile: options?.tags?.join(',') ?? '',
     chunkIndex: c.chunkIndex, addedBy: 'yourca', filedAt: now,
-    vector: localEmbed(c.content),
     type: 'memory', agent: 'yourca', date: now.split('T')[0],
   }));
   await s.upsertDrawers(drawers);
+  // upsertDrawers computes embeddings for drawers without vector
 
   try {
     const kg = await getKG();
