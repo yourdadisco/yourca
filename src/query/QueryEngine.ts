@@ -278,6 +278,37 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
 
     mutableMessages.push({ role: 'user', content: toolResults });
 
+    // Periodic goal verification (every 5 turns)
+    if (isGoalModeActive() && turnCount % 5 === 0) {
+      const vs = await Promise.all([
+        import('../services/goalEngine.js'),
+        import('../services/subagent.js'),
+      ]);
+      const { completeGoal, incrementIteration, getGoalState } = vs[0];
+      const { runSubagent } = vs[1];
+      const lastAsst = mutableMessages.filter(m => m.role === 'assistant').pop();
+      const lastAsstText = lastAsst?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
+      const goalState = getGoalState();
+      if (goalState && lastAsstText) {
+        console.log('\n=== Goal 🔍 Verifying (turn ' + turnCount + ') ===');
+        const verifyPrompt = '# Verification Task\n\nYou are a VERIFICATION agent. Independently verify this goal by EXECUTING TOOLS.\n\n## Goal\n' + goalState.goal + '\n\n## Claim\n' + lastAsstText.slice(0, 2000) + '\n\n## Instructions\n1. DO NOT trust the claim. Use Bash/Glob/Grep/Read to verify independently.\n2. Run real commands.\n3. Compare findings with claimed results.\n4. ONLY if goal is fully achieved by independent evidence:\n   PASS: <your evidence>\n5. If not:\n   FAIL: <what is missing>';
+        try {
+          const verifyCtx = { abortController, getAppState: () => ({ tools }), setAppState: () => {}, messages: [], permissionContext, options: {} };
+          const verifyResult = await runSubagent({ prompt: verifyPrompt, agentType: 'verify', parentContext: verifyCtx, tools });
+          if (verifyResult.text.startsWith('PASS')) {
+            completeGoal('Verified: ' + verifyResult.text.replace('PASS:', '').trim());
+            console.log('=== Goal ✅ VERIFIED (turn ' + turnCount + ') ===');
+            onEvent({ type: 'done', reason: 'goal_completed' });
+            return mutableMessages;
+          } else {
+            incrementIteration();
+            console.log('=== Goal ❌ NOT YET (turn ' + turnCount + ') ===');
+          }
+        } catch (e) { console.log('[Verify error]', e); }
+      }
+    }
+
+
     // Context window management
     const estimatedTokens = estimateMessagesTokens(mutableMessages);
     if (estimatedTokens > 120_000) {

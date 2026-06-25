@@ -63,7 +63,7 @@ async function main() {
 
   // Step 3: Wait for verification markers OR idle timeout
   const AI_TIMEOUT = 360000; // 6 min
-  const VERIFY_MARKERS = ["=== Goal", "🔍 Verifying", "✅ VERIFIED", "❌ NOT YET", "goal_completed];
+  const VERIFY_MARKERS = ["=== Goal", "🔍 Verifying", "✅ VERIFIED", "❌ NOT YET", "goal_completed", "(turn"];
   let verifyTriggered = false;
   try {
     await tracker.waitFor(VERIFY_MARKERS, AI_TIMEOUT);
