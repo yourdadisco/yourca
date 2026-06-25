@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * YourCA (Stable) — Readline-based CLI coding assistant (Powered by DeepSeek)
+ * YourCA — Readline-based CLI coding assistant (Powered by DeepSeek)
  *
  * Usage:
- *   yourcastable                  Start interactive REPL
- *   yourcastable --setup          First-time setup (save API key)
- *   yourcastable --api-key sk-... Run with specific API key
- *   yourcastable "prompt"         Single query
- *   echo "prompt" | yourcastable - Stdin mode
- *   yourcastable --version        Show version
- *   yourcastable --help           Show help
+ *   yourca                  Start interactive REPL
+ *   yourca --setup          First-time setup (save API key)
+ *   yourca --api-key sk-... Run with specific API key
+ *   yourca "prompt"         Single query
+ *   echo "prompt" | yourca - Stdin mode
+ *   yourca --version        Show version
+ *   yourca --help           Show help
  */
 
 import chalk from 'chalk';
@@ -53,7 +53,7 @@ async function main(): Promise<void> {
 
   // --version
   if (mainArgs.length === 1 && (mainArgs[0] === '--version' || mainArgs[0] === '-v')) {
-    console.log(`${VERSION} (YourCA Stable)`);
+    console.log(`${VERSION} (YourCA)`);
     return;
   }
 
@@ -104,16 +104,16 @@ async function runSetup(): Promise<void> {
 }
 
 function printHelp(): void {
-  console.log(chalk.bold('YourCA Stable — Readline-based Coding Assistant (Powered by DeepSeek)'));
+  console.log(chalk.bold('YourCA — Readline-based Coding Assistant (Powered by DeepSeek)'));
   console.log('');
   console.log('Usage:');
-  console.log('  yourcastable                   Start interactive REPL');
-  console.log('  yourcastable --setup           First-time setup wizard');
-  console.log('  yourcastable --api-key sk-...  Save API key & start');
-  console.log('  yourcastable "prompt"          Single query');
-  console.log('  echo "prompt" | yourcastable - Stdin mode');
-  console.log('  yourcastable --version         Show version');
-  console.log('  yourcastable --help            Show this help');
+  console.log('  yourca                   Start interactive REPL');
+  console.log('  yourca --setup           First-time setup wizard');
+  console.log('  yourca --api-key sk-...  Save API key & start');
+  console.log('  yourca "prompt"          Single query');
+  console.log('  echo "prompt" | yourca - Stdin mode');
+  console.log('  yourca --version         Show version');
+  console.log('  yourca --help            Show this help');
   console.log('');
   console.log('Config file: ~/.yourca/config.json');
   console.log('  {"api_key": "sk-...", "model": "deepseek-chat"}');
