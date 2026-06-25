@@ -298,21 +298,20 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
     const lastAsstText = lastAsst?.content.filter(c => c.type === 'text').map(c => c.text).join('\n') ?? '';
     const goalState = getGoalState();
     if (goalState && lastAsstText) {
-      try { onEvent({ type: 'text', text: '\n[Goal 🔍 Verifying...]\n' }); } catch {}
-      // Inject verification status into the conversation so the model sees it
+      console.log('\n=== Goal 🔍 Verifying ===');
       const verifyPrompt = `# Verification Task\n\nVerify whether the goal has been COMPLETELY achieved.\n\nGoal: ${goalState.goal}\n\nWhat was done:\n${lastAsstText.slice(0, 2000)}\n\nRespond with exactly:\nPASS: <reason>\nFAIL: <what is missing>`;
       try {
         const verifyCtx = { abortController, getAppState: () => ({ tools }), setAppState: () => {}, messages: [], permissionContext, options: {} };
         const verifyResult = await runSubagent({ prompt: verifyPrompt, agentType: 'verify', parentContext: verifyCtx as any, tools });
         if (verifyResult.text.startsWith('PASS')) {
           completeGoal('Goal verified: ' + verifyResult.text.replace('PASS:', '').trim());
-          onEvent({ type: 'text', text: '\n[Goal ✅ VERIFIED: ' + verifyResult.text.replace('PASS:', '').trim() + ']\n' });
+          console.log('=== Goal ✅ VERIFIED: ' + verifyResult.text.replace('PASS:', '').trim() + ' ===');
           onEvent({ type: 'done', reason: 'goal_completed' });
           return mutableMessages;
         } else {
           incrementIteration();
-          onEvent({ type: 'text', text: '\n[Goal ❌ NOT YET: ' + verifyResult.text.replace('FAIL:', '').trim() + ']\n' });
-          onEvent({ type: 'text', text: '[↻ Iteration ' + goalState.iteration + ' continuing...]\n' });
+          console.log('=== Goal ❌ NOT YET: ' + verifyResult.text.replace('FAIL:', '').trim() + ' ===');
+          console.log('=== ↻ Iteration ' + goalState.iteration + ' continuing... ===');
         }
       } catch {}
     }
