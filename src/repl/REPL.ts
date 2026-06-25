@@ -20,7 +20,7 @@ export async function startReadlineREPL(tools: readonly Tool[], systemPrompt: st
   let userCtx = await getUserContext();
   let sp = systemPrompt;
 
-  console.log(chalk.bold.cyan(`\n  YourCA Stable v0.1.0 — ${chalk.gray('readline')}`));
+  console.log(chalk.bold.cyan(`\n  YourCA v0.1.0 — ${chalk.gray('readline')}`));
   console.log(chalk.gray(`  Model: ${getMainLoopModel()} | Type /help\n`));
 
   const rl = readline.createInterface({ input: processStdin, output: processStdout, prompt: '' });
