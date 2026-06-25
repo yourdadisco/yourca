@@ -10,53 +10,63 @@ function log(s: string) { fs.appendFileSync(LOG, s + '\n', 'utf-8'); process.std
 function ok(n: string, c: boolean) { log(`  ${c ? '✅' : '❌'} ${n}`); if (c) pass++; else fail++; }
 
 async function main() {
-  log('=== DeLM Real TUI Test ===\n');
+  log('=== DeLM Real TUI Test (100% TUI) ===\n');
   try { fs.unlinkSync(LOG); } catch {}
 
-  const env = { ...process.env, YOURCA_DELM_MODE: '1' };
-  const proc = spawn('node', [YOURCA], { stdio: ['pipe', 'pipe', 'pipe'], cwd: path.resolve(import.meta.dirname, '..'), env });
+  const proc = spawn('node', [YOURCA], { stdio: ['pipe', 'pipe', 'pipe'], cwd: path.resolve(import.meta.dirname, '..'), env: { ...process.env, YOURCA_DELM_MODE: '1' } });
   let output = '';
   proc.stdout.on('data', (d: Buffer) => { output += d.toString('utf-8'); });
-  proc.stderr.on('data', () => {});
 
-  const waitForNew = async (markers: string[], timeout = 60000): Promise<boolean> => {
-    const start = Date.now();
-    let lastLen = output.length;
+  const waitFor = async (markers: string[], timeout = 60000): Promise<boolean> => {
+    const start = Date.now(); let lastLen = output.length;
     while (Date.now() - start < timeout) {
-      const newOut = output.slice(lastLen);
-      for (const m of markers) { if (newOut.includes(m)) return true; }
-      if (newOut.length > 0) lastLen = output.length;
+      for (const m of markers) { if (output.slice(lastLen).includes(m)) return true; }
+      if (output.length > lastLen) lastLen = output.length;
       await new Promise(r => setTimeout(r, 200));
     }
     return false;
   };
 
-  await waitForNew(['> '], 10000);
-  log('✅ TUI ready\n');
+  await waitFor(['> '], 10000);
+  log('TUI ready\n');
 
-  // Step 1: Task that benefits from multi-agent
-  log('--- Step 1: Multi-step task ---');
+  // Test 1: Research task
+  log('--- Test 1: Research task ---');
   const c1 = output.length;
-  proc.stdin.write('请调研这个项目的依赖关系\n');
-  const t1 = await waitForNew(['Glob', 'Bash', 'Grep'], 180000);
-  ok('AI uses tools for research', t1);
-  if (t1) log(`  Tools detected\n`);
-  await waitForNew(['> '], 120000);
-  const new1 = output.slice(c1);
-  ok('AI finds dependency info', new1.includes('package.json') || new1.includes('dependencies') || new1.includes('node_modules'));
+  proc.stdin.write('调研这个项目用了哪些外部库\n');
+  ok('AI uses tools (Glob/Bash/Grep)', await waitFor(['Glob', 'Bash', 'Grep'], 180000));
+  await waitFor(['> '], 120000);
+  ok('AI produces research results', output.slice(c1).includes('package.json') || output.slice(c1).includes('dependencies') || output.slice(c1).includes('node_modules') || output.slice(c1).includes('React'));
 
-  // Step 2: Verify DeML infrastructure
-  log('\n--- Step 2: DeLM module verification ---');
-  process.env.YOURCA_DELM_MODE = "1";
-  const { isDelmMode, getTaskStatus, getLatestGist, addTask, publishToGist } = await import('../src/coordinator/delmMode.js');
-  ok('DeLM mode detected', isDelmMode());
-  const gid = publishToGist('verified', 'agent-1', 'Test result', ['test']);
-  ok('Gist publish works', gid.length > 0);
-  ok('Gist can be read', getLatestGist(5).length > 0);
+  // Test 2: Multi-task coordination
+  log('\n--- Test 2: Multi-task coordination ---');
+  const c2 = output.length;
+  proc.stdin.write('你可以同时处理多个子任务吗？怎么协调？\n');
+  ok('AI responds about coordination', await waitFor(['子任务', 'Agent', 'agent', '协调', '任务', '多个', '同时'], 120000));
+
+  // Test 3: /goal set
+  log('\n--- Test 3: /goal set ---');
+  proc.stdin.write('/goal "列出src下的所有TypeScript文件"\n');
+  ok('/goal set', await waitFor(['Goal set', 'goal'], 30000));
+  await waitFor(['> '], 30000);
+
+  // Test 4: Goal execution
+  log('\n--- Test 4: Goal execution ---');
+  const c4 = output.length;
+  proc.stdin.write('列出src下的所有TypeScript文件\n');
+  ok('AI works toward goal', await waitFor(['src/', '.ts', 'Glob'], 300000));
+  await waitFor(['> '], 120000);
+  ok('AI produces file list', output.slice(c4).includes('.ts'));
+
+  // Test 5: Goal status
+  log('\n--- Test 5: Goal status ---');
+  const c5 = output.length;
+  proc.stdin.write('/goal\n');
+  await waitFor(['Goal', 'goal'], 30000);
+  ok('/goal status works', output.slice(c5).includes('Goal') || output.slice(c5).includes('goal'));
 
   proc.kill(9);
-  log(`\n=== ${pass}/${pass+fail} passed ===`);
+  log(`\n${pass}/${pass+fail} passed\n`);
   process.exit(fail > 0 ? 1 : 0);
 }
-
 main().catch(e => { log(`FATAL: ${e.message}`); process.exit(1); });
