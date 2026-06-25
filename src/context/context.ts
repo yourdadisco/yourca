@@ -11,6 +11,7 @@ import { execSync } from 'child_process';
 import { readFileSync, existsSync, statSync } from 'fs';
 import { resolve, basename } from 'path';
 import { getProjectRoot } from '../state/bootstrap.js';
+import { buildRagContext } from '../services/vectorMemory/index.js';
 
 // ---- Git context with memoization ----
 
@@ -209,7 +210,7 @@ export function invalidateContextCaches(): void {
 
 // ---- System prompt builder ----
 
-export function buildSystemPrompt(context: SystemContext, userContext: UserContext): string {
+export async function buildSystemPrompt(context: SystemContext, userContext: UserContext): Promise<string> {
   const parts: string[] = [];
 
   // Date
@@ -268,6 +269,21 @@ You are helping the user with their project "${projectName}".
   }
   if (context.recentCommits) {
     parts.push('Recent commits:', context.recentCommits);
+  }
+
+  // ── Cross-session memory injection ──
+  // Load recent/high-relevance memories from the persistent vector DB
+  // so the model sees past context at session startup.
+  try {
+    const ragContext = await buildRagContext(
+      'session context, project decisions, user preferences, past interactions, previous conversations',
+      5, 2000,
+    );
+    if (ragContext) {
+      parts.push('', ragContext);
+    }
+  } catch {
+    // Non-fatal: mempalace may not be initialized or empty
   }
 
   return parts.join('\n');

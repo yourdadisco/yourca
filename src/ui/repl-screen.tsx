@@ -219,7 +219,7 @@ export async function startInkREPL(): Promise<void> {
   initAPI({ apiKey });
   if (process.env.YOURCA_MODEL) setMainLoopModel(process.env.YOURCA_MODEL);
   const [sysCtx, userCtx] = await Promise.all([getSystemContext(), getUserContext()]);
-  const systemPrompt = buildSystemPrompt(sysCtx, userCtx);
+  const systemPrompt = await buildSystemPrompt(sysCtx, userCtx);
 
   // Create a pass-through stdin that tells Ink it's a TTY
   const PassThrough = (await import('stream')).PassThrough;

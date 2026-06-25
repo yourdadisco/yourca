@@ -112,4 +112,4 @@ export const publishToGist = _publishToGist;
 export const isCoordinatorMode = _isCoordinatorMode;
 export const setCoordinatorMode = _setCoordinatorMode;
 export { getCoordinatorUserContext, claimNextTask, completeTask, failTask, getTaskStatus, setAgentStatus, getLatestGist, getVerifiedFacts, getFailureLog, buildDelmSystemPrompt, broadcastVerification };
-export { addTask as addDelmTask } from './delmMode.js';
+export { addTask as addDelmTask, registerAgent as registerDelmAgent } from './delmMode.js';

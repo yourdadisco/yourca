@@ -21,7 +21,7 @@ import { classifyError, logError } from '../services/errors.js';
 import { createUserMessage } from './messages.js';
 import { enhanceSystemPrompt, autoSave } from '../services/vectorMemory/index.js';
 import { getArchitectureSystemPrompt } from '../coordinator/index.js';
-import { isGoalModeActive, buildGoalSystemPrompt } from '../services/goalEngine.js';
+import { isGoalModeActive, buildGoalSystemPrompt, checkGoalCompletion, completeGoal, incrementIteration } from '../services/goalEngine.js';
 
 const DEEPSEEK_PRICING = { input: 0.00027, output: 0.0011 };
 const MAX_TURNS = 50;
@@ -117,6 +117,7 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
   while (turnCount < maxTurns) {
     turnCount++;
     incrementTurnCount();
+    if (isGoalModeActive()) incrementIteration();
     consecutiveErrors++;
 
     // Check for abort
@@ -272,6 +273,16 @@ export async function runQuery(config: QueryConfig): Promise<Message[]> {
     const assistantText = assistantContent.filter(c => c.type === 'text').map(c => c.text).join('\n');
     if (assistantText.trim()) {
       autoSave(assistantText).catch(() => {});
+    }
+
+    // Check goal completion after each assistant turn
+    if (isGoalModeActive()) {
+      const { isComplete, reason } = checkGoalCompletion(mutableMessages);
+      if (isComplete) {
+        completeGoal(reason);
+        onEvent({ type: 'done', reason: 'goal_completed' });
+        return mutableMessages;
+      }
     }
 
     const toolCalls = assistantContent.filter(

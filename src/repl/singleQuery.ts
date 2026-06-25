@@ -20,7 +20,7 @@ export async function runSingleQuery(prompt: string): Promise<void> {
   }
 
   const [sysCtx, userCtx] = await Promise.all([getSystemContext(), getUserContext()]);
-  const systemPrompt = buildSystemPrompt(sysCtx, userCtx);
+  const systemPrompt = await buildSystemPrompt(sysCtx, userCtx);
   const messages = [createUserMessage(prompt)];
   const { getTotalCostUSD, getTotalInputTokens, getTotalOutputTokens } = await import('../state/bootstrap.js');
 

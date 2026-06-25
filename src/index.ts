@@ -32,7 +32,7 @@ async function main(): Promise<void> {
       l0Identity: `You are YourCA, a general-purpose AI assistant.\nCurrent wing: ${wing}\nDetermine your role from the project context.`,
       wing,
     });
-  } catch {}
+  } catch (e) { console.error('Warning: MemPalace init failed, memory disabled:', (e as Error).message); }
 
   const args = process.argv.slice(2);
 

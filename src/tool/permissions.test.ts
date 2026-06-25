@@ -4,7 +4,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Tool, ToolPermissionContext } from './Tool.js';
-import { checkToolPermission, createDefaultPermissionContext, filterToolsByDenyRules, formatPermissionRules } from './permissions.ts';
+import { checkToolPermission, createDefaultPermissionContext, filterToolsByDenyRules, formatPermissionRules } from './permissions.js';
 
 // ── Helper: create a mock tool ──────────────────────────────────────────────
 function makeTool(overrides: Partial<Tool> = {}): Tool {

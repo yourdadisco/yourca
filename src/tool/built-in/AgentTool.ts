@@ -16,7 +16,7 @@ export const AgentTool = buildTool({
     const agentType = (input.subagent_type as string) ?? 'general-purpose';
     const runInBackground = input.run_in_background === true;
     const { runSubagent } = await import('../../services/subagent.js');
-    const { isCoordinatorMode, isDelmMode, registerAgent, publishToGist, addDelmTask } = await import('../../coordinator/index.js');
+    const { isCoordinatorMode, isDelmMode, registerAgent, updateAgentStatus, publishToGist, addDelmTask } = await import('../../coordinator/index.js');
     const appState = context.getAppState();
     const tools = appState?.tools ?? [];
     const agentId = `agent_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -49,12 +49,10 @@ export const AgentTool = buildTool({
         tools,
         maxTurns: 50,
       }).then(result => {
-        const { updateAgentStatus } = require('../../coordinator/index.js');
         updateAgentStatus(agentId, result.success ? 'completed' : 'failed');
 
         // In DeLM mode, publish result to gist
         if (isDelmMode()) {
-          const { publishToGist } = require('../../coordinator/index.js');
           publishToGist(
             result.success ? 'verified' : 'failure',
             agentId,

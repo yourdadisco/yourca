@@ -111,7 +111,7 @@ export async function startREPL(
         replState.newAbortController();
         invalidateContextCaches();
         [sysCtx, userCtx] = await Promise.all([getSystemContext(), getUserContext()]);
-        sp = buildSystemPrompt(sysCtx, userCtx);
+        sp = await buildSystemPrompt(sysCtx, userCtx);
         console.clear();
         console.log(header());
         rl.prompt(); return;
@@ -213,6 +213,6 @@ export async function startREPLFromEntry(): Promise<void> {
   initAPI({ apiKey });
   if (process.env.YOURCA_MODEL) setMainLoopModel(process.env.YOURCA_MODEL);
   const [sysCtx, userCtx] = await Promise.all([getSystemContext(), getUserContext()]);
-  const systemPrompt = buildSystemPrompt(sysCtx, userCtx);
+  const systemPrompt = await buildSystemPrompt(sysCtx, userCtx);
   await startREPL(tools, systemPrompt);
 }
