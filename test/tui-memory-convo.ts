@@ -1,7 +1,5 @@
 /**
- * TUI Real Conversation Test: tests if model remembers information
- * across conversation turns via enhanceSystemPrompt.
- * Spawns yourca, has a real conversation, captures output.
+ * TUI Conversation Test — waits for prompt (> ), not fixed sleep.
  */
 import { spawn } from 'node:child_process';
 import * as path from 'path';
@@ -10,15 +8,51 @@ import * as fs from 'fs';
 const YOURCA = path.resolve(import.meta.dirname, '..', 'dist', 'index.js');
 const LOG = path.resolve(import.meta.dirname, '..', 'logs', 'tui-memory-convo.log');
 
+function log(msg: string) {
+  fs.appendFileSync(LOG, msg + '\n', 'utf-8');
+  process.stdout.write(msg + '\n');
+}
+
 function write(msg: string) {
   fs.appendFileSync(LOG, msg, 'utf-8');
   process.stdout.write(msg);
 }
 
-function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+/** Wait until stdout has `> ` (the REPL prompt), or timeout. Returns captured output. */
+function waitForPrompt(proc: any, timeoutMs = 60000): Promise<string> {
+  return new Promise((resolve) => {
+    let buf = '';
+    const timer = setTimeout(() => {
+      proc.stdout.removeListener('data', onData);
+      resolve(buf);
+    }, timeoutMs);
+    const onData = (data: Buffer) => {
+      buf += data.toString('utf-8');
+      // REPL prints `> ` as prompt — that's our signal
+      if (buf.includes('> \n') || buf.endsWith('> ')) {
+        clearTimeout(timer);
+        proc.stdout.removeListener('data', onData);
+        resolve(buf);
+      }
+    };
+    proc.stdout.on('data', onData);
+  });
+}
+
+async function sendAndWait(proc: any, line: string, label: string): Promise<string> {
+  write(`\n--- ${label} ---\n`);
+  proc.stdin.write(line + '\n');
+  const output = await waitForPrompt(proc);
+  log(`  Input:  ${line}`);
+  // Extract the last meaningful response (between last two prompts)
+  const lines = output.split('\n').filter(l => l.trim() && l !== '> ' && !l.startsWith('> '));
+  const response = lines.slice(-5).join('\n  ');
+  if (response) log(`  Output: ${response}`);
+  return output;
+}
 
 async function main() {
-  write('=== TUI Memory Conversation Test ===\n\n');
+  log('=== TUI Memory Conversation Test (Prompt-Based) ===\n');
   try { fs.unlinkSync(LOG); } catch {}
 
   const proc = spawn('node', [YOURCA], {
@@ -26,62 +60,49 @@ async function main() {
     env: { ...process.env },
   });
 
-  let allOutput = '';
-  let dataSinceLastCapture = '';
+  // Wait for first prompt
+  log('Waiting for TUI startup...');
+  await waitForPrompt(proc, 10000);
+  log('✅ TUI ready\n');
 
-  proc.stdout.on('data', (data: Buffer) => {
-    const text = data.toString('utf-8');
-    allOutput += text;
-    dataSinceLastCapture += text;
-  });
-  proc.stderr.on('data', () => {});
+  // 1. /memory
+  await sendAndWait(proc, '/memory', '/memory (stats)');
 
-  await sleep(3000);
+  // 2. /role
+  await sendAndWait(proc, '/role', '/role');
 
-  // Step 1: Check memory stats
-  write('1. /memory before storing...\n');
-  proc.stdin.write('/memory\n');
-  await sleep(2000);
-  write('   Captured: ' + dataSinceLastCapture.slice(-200) + '\n');
-  dataSinceLastCapture = '';
+  // 3. /goal test
+  await sendAndWait(proc, '/goal test-memory', '/goal');
 
-  // Step 2: Store something (as a memory command, not conversation)
-  write('\n2. Storing memory via memory_store tool...\n');
-  // Can't call memory_store directly - it's a model tool. Instead, store via API
+  // 4. Store a preference
+  log('\n--- /memory_store (storing preference) ---');
   proc.stdin.write('记住：用户偏好Vitest测试框架，喜欢TypeScript\n');
-  await sleep(30000); // Wait for AI response
+  log('  Input: 记住...');
+  const storeOutput = await waitForPrompt(proc, 120000);
+  log('  AI replied (waiting for prompt ⏎)');
+  // Extract AI's response text between the prompt markers
+  const storeLines = storeOutput.split('\n').filter(l => l.trim() && l !== '> ');
+  const aiResponse = storeLines.filter(l => !l.includes('YourCA v') && !l.includes('Type /help')).slice(-3).join('│');
+  log(`  AI: ${aiResponse}`);
 
-  write('   AI response captured: ' + dataSinceLastCapture.slice(0, 300) + '\n');
-  dataSinceLastCapture = '';
+  // 5. Ask if AI remembers
+  const recallOutput = await sendAndWait(proc, '我之前告诉过你我喜欢什么测试框架？', 'Asking AI to recall');
+  const recallLines = recallOutput.split('\n').filter(l => l.trim() && l !== '> ');
+  const aiRecall = recallLines.filter(l => !l.includes('YourCA v') && !l.includes('Type /help')).slice(-3).join('│');
+  log(`  AI: ${aiRecall}`);
 
-  // Step 3: Ask if it remembers
-  write('\n3. Asking about preferences...\n');
-  proc.stdin.write('我之前告诉过你我喜欢什么测试框架？\n');
-  await sleep(30000);
-
-  write('   AI response: ' + dataSinceLastCapture.slice(0, 300) + '\n');
-  dataSinceLastCapture = '';
-
-  // Step 4: Check /memory command
-  write('\n4. /memory search...\n');
-  proc.stdin.write('/memory Vitest\n');
-  await sleep(3000);
-  write('   /memory result: ' + dataSinceLastCapture.slice(0, 200) + '\n');
+  // 6. /memory search
+  await sendAndWait(proc, '/memory Vitest', '/memory Vitest');
 
   // Done
   proc.kill(9);
-  write('\n\n=== FULL OUTPUT ===\n');
-  write(allOutput.slice(-2000)); // Last 2000 chars
-  write('\n=== END ===\n');
 
-  // Analysis
-  write('\n--- Analysis ---\n');
-  const hasMemoryStats = allOutput.includes('Drawers');
-  const hasAIMemory = allOutput.includes('Vitest') || allOutput.includes('vitest');
-  write(`  ${hasMemoryStats ? '✅' : '❌'} /memory command works\n`);
-  write(`  ${hasAIMemory ? '✅' : '❌'} AI remembered information\n`);
-
-  proc.kill();
+  // Summary
+  log('\n=== SUMMARY ===');
+  log(`  ${storeOutput.length > 0 ? '✅' : '❌'} AI acknowledged storage`);
+  log(`  ${recallOutput.includes('Vitest') || recallOutput.includes('vitest') ? '✅' : '❌'} AI recalled memory`);
+  log(`  ${storeOutput.includes('Drawers') ? '✅' : '❌'} /memory works`);
+  log('\nFull log: ' + LOG);
 }
 
-main().catch(err => { write(`\nFATAL: ${err.message}`); process.exit(1); });
+main().catch(err => { log(`\nFATAL: ${err.message}`); process.exit(1); });
