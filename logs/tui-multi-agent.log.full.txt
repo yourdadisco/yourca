@@ -1,0 +1,70 @@
+
+  YourCA v0.1.0 — readline
+  Model: deepseek-chat | Type /help
+
+> 
+🧠 MemPalace Memory
+   Wing:       default
+   Drawers:    4
+   Wings:      yourca
+   Rooms:      1
+   Disk:       0 KB
+   Use /memory <query> to search
+> 
+🎯 Current wing: yourca
+   Use /role <name> to switch
+   Use /role --detect to auto-detect from project
+   Use /role --list to show rooms
+> 
+🔄 Coordinator mode: ON
+   Model will decompose tasks and spawn workers.
+   Use /goal to set an objective for the coordinator to pursue.
+> 
+🔄 Coordinator mode: OFF
+   Model will work directly, without spawning workers.
+> 
+🎯 Goal set: test-agent
+   Starting loop engineering. Use /status to check progress.
+   Use /goal clear to finish.
+> 
+🎯 Active Goal:
+   test-agent
+   Status: active
+   Iterations: 0
+   Use /goal clear to finish
+> 
+🎯 Goal cleared.
+> 好的，我已记住：
+- **包管理器**：pnpm
+- **项目架构**：Monorepo
+
+有什么需要帮忙的吗？
+> 
+🔍 Memories matching: "pnpm"
+   [-54%] yourca/conversation, 0d
+       用户说：请帮我检查一下Button组件的onClick事件冒泡问题...
+   [-68%] yourca/conversation, 0d
+       用户喜欢用Vitest写测试，偏好TypeScript严格模式...
+   [-68%] yourca/conversation, 0d
+       用户喜欢用Vitest写测试，偏好TypeScript严格模式...
+   [-77%] yourca/conversation, 0d
+       用户说：我喜欢用TypeScript写React组件，用Vitest跑测试...
+> 
+  🔧 Bash({"command":"ls -la src/tool/","description":"查看 src/tool/ 目录下的文件"}…)
+  ⬅️  Exit code: 0…
+`src/tool/` 目录下的文件结构如下：
+
+| 名称 | 类型 | 说明 |
+|------|------|------|
+| `built-in/` | 目录 | 内置工具子目录 |
+| `permissions.test.ts` | 文件 | 权限相关测试 |
+| `permissions.ts` | 文件 | 权限逻辑 |
+| `Tool.ts` | 文件 | 工具类定义 |
+| `tools.ts` | 文件 | 工具相关逻辑 |
+
+需要进一步查看某个文件的内容或 `built-in/` 目录下的内容吗？
+> 
+🔄 Coordinator mode: ON
+   Model will decompose tasks and spawn workers.
+   Use /goal to set an objective for the coordinator to pursue.
+> 
